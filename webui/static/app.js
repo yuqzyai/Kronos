@@ -6,6 +6,9 @@
     dataset: null,
     candles: [],
     forecast: null,
+    context: null,
+    jobId: null,
+    progressText: "",
     log: [],
     busy: null,
     source: "binance",
@@ -93,8 +96,8 @@
     if (!Number.isInteger(predLen) || predLen < 1 || predLen > 120) {
       problems.push("Horizon must be a whole number from 1 to 120.");
     }
-    if (!Number.isInteger(samples) || samples < 1 || samples > 4) {
-      problems.push("Samples must be a whole number from 1 to 4.");
+    if (!Number.isInteger(samples) || samples < 1 || samples > 16) {
+      problems.push("Samples must be a whole number from 1 to 16.");
     }
     return { problems, maxContext };
   }
@@ -149,7 +152,7 @@
     if (!dataset) forecastReason = "Load data and the model first.";
     else if (!loadedModel) forecastReason = "Data is loaded. Load the model before forecasting.";
     else if (state.busy === "model") forecastReason = "The model is still loading.";
-    else if (state.busy === "forecast") forecastReason = "Forecast is running. The chart updates when the horizon finishes.";
+    else if (state.busy === "forecast") forecastReason = state.progressText || "Forecast is running. Finished samples are counted. There is no estimated percent.";
     else if (check.problems.length) forecastReason = check.problems[0];
     else if (mode === "forward" && closed < lookback) {
       forecastReason = `Need ${lookback} closed candles. This dataset has ${closed}.`;
@@ -158,7 +161,13 @@
     }
     el("ready-forecast").textContent = forecastReason ? "Blocked" : "Ready";
     el("run").disabled = Boolean(forecastReason) || state.busy != null;
-    el("run-reason").textContent = forecastReason || `Ready · ${numbers().lookback} context candles · horizon ${numbers().predLen}.`;
+    el("run-reason").textContent = state.busy === "forecast"
+      ? "The chart keeps the previous forecast until this run finishes or is cancelled."
+      : (forecastReason || `Ready · ${numbers().lookback} context candles · horizon ${numbers().predLen} · ${numbers().samples} samples.`);
+    const progress = el("progress");
+    progress.hidden = state.busy !== "forecast";
+    progress.textContent = state.progressText || "";
+    el("cancel").hidden = state.busy !== "forecast";
     el("refresh").disabled = !(dataset && dataset.source === "binance") || state.busy != null;
     el("load-binance").disabled = state.busy != null;
     el("load-sample").disabled = state.busy != null;
@@ -176,6 +185,7 @@
     renderModelCard(loadedModel, chosen);
     renderForecastPanel();
     renderDataPanel();
+    renderContext();
     renderLog();
     renderLegend();
     chart.setData({
@@ -239,9 +249,10 @@
     const last = forecast.path[forecast.path.length - 1];
     const first = forecast.path[0];
     const observed = forecast.input.last_close_price;
-    figure.textContent = formatPrice(last.close);
+    const terminal = forecast.terminal;
+    figure.textContent = formatPrice(terminal ? terminal.median_close : last.close);
     figure.className = "figure";
-    label.textContent = forecast.sample_count > 1 ? "Mean horizon close" : "Horizon close";
+    label.textContent = forecast.sample_count > 1 ? "Median horizon close" : "Horizon close";
     kicker.textContent = forecast.mode === "held_out" ? "Held-out" : "Forward";
     const rows = [
       ["Horizon", forecast.horizon_text],
@@ -249,14 +260,16 @@
       ["After input", formatUtc(forecast.boundary_open)],
       ["Input close", formatPrice(observed)],
       ["First open", formatPrice(first.open)],
-      ["Path", forecast.sample_count > 1 ? `Mean of ${forecast.sample_count} draws` : "Single sampled path"],
+      ["Path", forecast.sample_count > 1 ? `Median of ${forecast.sample_count} paths` : "Single sampled path"],
       ["Elapsed", `${forecast.elapsed_seconds.toFixed(1)} s`],
       ["Model", `${forecast.model.name} · ${forecast.model.device}`],
     ];
-    if (forecast.sample_count > 1 && Array.isArray(forecast.sample_closes)) {
-      const ends = forecast.sample_closes.map((series) => series[series.length - 1].close);
-      rows.push(["Sample closes", `${formatPrice(Math.min(...ends))} – ${formatPrice(Math.max(...ends))}`]);
-      rows.push(["Spread", "Range of those draws, not a confidence interval"]);
+    if (terminal && forecast.sample_count > 1) {
+      rows.push(["Mean close", formatPrice(terminal.mean_close)]);
+      rows.push(["Sample q10–q90", `${formatPrice(terminal.q10)} – ${formatPrice(terminal.q90)}`]);
+      rows.push(["Dispersion", "Model sample dispersion, not a confidence interval"]);
+      rows.push(["Above last close", `${Math.round(terminal.fraction_above * terminal.samples)} of ${terminal.samples} samples`]);
+      rows.push(["Fraction", "Fraction of samples, not a market probability"]);
     }
     if (forecast.error_stats) {
       rows.push(["Close MAE", formatPrice(forecast.error_stats.mae)]);
@@ -325,7 +338,71 @@
     if (dataset.used_weight_1m != null) rows.push(["Weight 1m", String(dataset.used_weight_1m)]);
     rows.push(["Amount", amountLabel(dataset.amount_policy)]);
     if (dataset.warnings && dataset.warnings.length) rows.push(["Note", dataset.warnings[0]]);
+    const context = state.context;
+    if (context && context.derivatives) {
+      rows.push(["Perpetual", derivativeLine(context.derivatives)]);
+    }
+    if (context && Array.isArray(context.higher_timeframes) && context.higher_timeframes.length) {
+      rows.push(["Higher TF", context.higher_timeframes.map(higherLine).join(" · ")]);
+    }
     facts.innerHTML = factRows(rows);
+  }
+
+  function derivativeLine(item) {
+    if (!item || item.status === "not_applicable") return "Not requested for this file";
+    if (item.status === "unavailable") return "Unavailable";
+    if (item.status === "not_listed") return "No USD-M perpetual";
+    if (item.status === "ok" && item.funding && item.funding.latest) {
+      return `Funding ${Number(item.funding.latest.funding_rate).toExponential(2)} at ${formatUtc(item.funding.latest.time)}`;
+    }
+    return item.status || "—";
+  }
+
+  function higherLine(item) {
+    if (!item || item.status !== "ok" || item.last_bar_return == null) return `${item && item.interval ? item.interval : "higher"} unavailable`;
+    const pct = (item.last_bar_return * 100).toFixed(2);
+    return `${item.interval} last bar ${pct}%`;
+  }
+
+  function renderContext() {
+    const root = el("context-body");
+    if (!root) return;
+    const context = state.context;
+    if (!context) {
+      root.innerHTML = "<p class='hint'>Load data to see aligned context.</p>";
+      return;
+    }
+    const blocks = [];
+    (context.higher_timeframes || []).forEach((item) => {
+      const title = item.interval ? `${item.interval} · ${item.interval_label || ""}` : "Higher timeframe";
+      if (item.status !== "ok") {
+        blocks.push(`<div class="context-block"><h3>${escapeHtml(title)}</h3><p class="reason">${escapeHtml(item.reason || item.note || "Unavailable")}</p></div>`);
+        return;
+      }
+      const vol = item.log_return_volatility == null ? "—" : Number(item.log_return_volatility).toFixed(4);
+      const volume = item.last_volume_over_median == null ? (item.volume_note || "—") : `${Number(item.last_volume_over_median).toFixed(2)}× median`;
+      const barReturn = item.last_bar_return == null ? "—" : `${(item.last_bar_return * 100).toFixed(2)}%`;
+      blocks.push(`<div class="context-block"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(item.source || "")}. ${item.bars} closed bars through ${escapeHtml(formatUtc(item.as_of))}.</p><p>Last bar return ${barReturn}. Log-return volatility ${vol}. Volume ${escapeHtml(String(volume))}.</p><p>${escapeHtml(item.sign_vs_base_last_bar)}. ${escapeHtml(item.note || "")}</p></div>`);
+    });
+    const deriv = context.derivatives || {};
+    if (deriv.status === "ok") {
+      const fund = deriv.funding && deriv.funding.latest;
+      const oi = deriv.open_interest && deriv.open_interest.latest;
+      const taker = deriv.taker && deriv.taker.latest;
+      blocks.push(`<div class="context-block"><h3>USD-M perpetual ${escapeHtml(deriv.symbol || "")}</h3><p>${escapeHtml(deriv.perpetual && deriv.perpetual.note || "")}</p><p>Funding ${fund ? `${Number(fund.funding_rate).toExponential(3)} at ${formatUtc(fund.time)}` : "no aligned record"}.</p><p>Open interest ${oi ? `${formatPrice(oi.open_interest_contracts)} contracts at ${formatUtc(oi.time)}` : "no aligned history"}.</p><p>Taker buy share ${taker && taker.taker_buy_share != null ? `${(taker.taker_buy_share * 100).toFixed(1)}% of taker volume at ${formatUtc(taker.time)}` : "no aligned bar"}.</p></div>`);
+      if (deriv.after_as_of) {
+        blocks.push(`<div class="context-block"><h3>Snapshot after the candle as-of</h3><p>${escapeHtml(deriv.after_as_of.note)} ${formatUtc(deriv.after_as_of.time)} · ${formatPrice(deriv.after_as_of.open_interest_contracts)} contracts.</p></div>`);
+      }
+    } else {
+      blocks.push(`<div class="context-block"><h3>USD-M perpetual</h3><p class="reason">${escapeHtml(deriv.reason || "No perpetual context.")}</p><p>${deriv.checked_at ? `Checked ${escapeHtml(formatUtc(deriv.checked_at, true))}.` : ""}</p></div>`);
+    }
+    const spot = context.spot_taker;
+    if (spot && spot.status === "ok") {
+      blocks.push(`<div class="context-block"><h3>Spot taker buys</h3><p>Last candle ${(spot.last_taker_buy_share_of_quote * 100).toFixed(1)}% of quote volume. Recent mean ${(spot.recent_mean_taker_buy_share_of_quote * 100).toFixed(1)}% over ${spot.bars} bars.</p><p>${escapeHtml(spot.note)}</p></div>`);
+    } else if (spot && spot.status === "absent") {
+      blocks.push(`<div class="context-block"><h3>Spot taker buys</h3><p>${escapeHtml(spot.reason)}</p></div>`);
+    }
+    root.innerHTML = blocks.join("") || "<p class='hint'>No context for this load.</p>";
   }
 
   function amountLabel(policy) {
@@ -350,9 +427,10 @@
       ["down", "Down close"],
     ];
     if (state.dataset && state.dataset.forming) items.push(["forming", "Forming"]);
-    if (state.forecast) items.push(["forecast", state.forecast.sample_count > 1 ? "Mean path" : "Forecast"]);
+    if (state.forecast) items.push(["forecast", state.forecast.sample_count > 1 ? "Median" : "Forecast"]);
     if (state.forecast && state.forecast.mode === "held_out") items.push(["forming", "Later candles"]);
-    if (state.forecast && state.forecast.sample_count > 1) items.push(["sample", "Samples"]);
+    if (state.forecast && state.forecast.sample_count > 1) items.push(["sample", "Sample paths"]);
+    if (state.forecast && state.forecast.band) items.push(["forecast", "Dispersion"]);
     el("legend").innerHTML = items.map(([kind, label]) => `<li><i class="swatch ${kind}"></i>${label}</li>`).join("");
   }
 
@@ -369,7 +447,9 @@
   function applyDataset(payload, banner) {
     state.dataset = payload.dataset;
     state.candles = payload.candles || [];
+    state.context = payload.context || null;
     state.forecast = null;
+    state.jobId = null;
     if (payload.log) state.log = payload.log;
     setBanner(null, "");
     render();
@@ -477,7 +557,7 @@
     }
     await withBusy("forecast", async () => {
       const { lookback, predLen, samples, temperature, topP, mode } = numbers();
-      const payload = await api("/api/forecast", {
+      const started = await api("/api/forecast", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -490,10 +570,62 @@
           mode,
         }),
       });
-      state.forecast = payload;
-      state.log = payload.log || state.log;
-      setBanner(null, "");
+      state.jobId = started.job_id;
+      state.progressText = `Sampled 0 of ${started.total}.`;
+      let job = started;
+      while (job.status === "running") {
+        await wait(400);
+        job = await api(`/api/forecast/jobs/${started.job_id}`);
+        state.progressText = `Sampled ${job.completed} of ${job.total}.`;
+        state.log = job.log || state.log;
+        render();
+      }
+      state.log = job.log || state.log;
+      if (job.status === "done" && job.result) {
+        state.forecast = job.result;
+        setBanner(null, "");
+      } else if (job.status === "cancelled") {
+        setBanner("ok", job.error || "Cancelled. The chart was not updated with a partial fan.");
+      } else {
+        throw new Error(job.error || "The forecast failed.");
+      }
     });
+  }
+
+  function wait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function cancelForecast() {
+    if (!state.jobId) return;
+    await api(`/api/forecast/jobs/${state.jobId}/cancel`, { method: "POST" });
+  }
+
+  async function runCheck() {
+    await withBusy("check", async () => {
+      const report = await api("/api/evaluate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ checkpoints: 2, lookback: numbers().lookback, pred_len: Math.min(24, numbers().predLen) }),
+      });
+      state.log = report.log || state.log;
+      el("check-result").textContent = `Kronos median MAE ${report.kronos_median_mae.toExponential(3)}\nPersistence MAE ${report.persistence_mae.toExponential(3)}\n${report.comparison_note}\n${report.training_cutoff}`;
+    });
+  }
+
+  async function exportRecord() {
+    if (!state.jobId) {
+      setBanner("error", "Finish a forecast before downloading its record.");
+      return;
+    }
+    const record = await api(`/api/forecast/jobs/${state.jobId}/record`);
+    const blob = new Blob([JSON.stringify(record, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "kronos-forecast-record.json";
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   function setSource(source) {
@@ -553,6 +685,9 @@
     el("load-sample").addEventListener("click", () => guard(loadSample()));
     el("load-model").addEventListener("click", () => guard(loadModel()));
     el("run").addEventListener("click", () => guard(runForecast()));
+    el("cancel").addEventListener("click", () => guard(cancelForecast()));
+    el("run-check").addEventListener("click", () => guard(runCheck()));
+    el("export-record").addEventListener("click", () => guard(exportRecord()));
     el("csv-file").addEventListener("change", (event) => {
       const file = event.target.files && event.target.files[0];
       guard(loadCsv(file)).finally(() => {
@@ -675,6 +810,11 @@
         if (!host) return;
         host.forecast = point;
         host.samples = sampleAt(forecast, index);
+        host.q10 = bandAt(forecast, index, "q10");
+        host.q90 = bandAt(forecast, index, "q90");
+        host.q25 = bandAt(forecast, index, "q25");
+        host.q75 = bandAt(forecast, index, "q75");
+        host.meanClose = meanAt(forecast, index);
       });
     }
     const futureBars = [];
@@ -688,6 +828,11 @@
           forecast: point,
           forming: forming && index === 0 && forming.time === point.time ? forming : null,
           samples: sampleAt(forecast, index),
+          q10: bandAt(forecast, index, "q10"),
+          q90: bandAt(forecast, index, "q90"),
+          q25: bandAt(forecast, index, "q25"),
+          q75: bandAt(forecast, index, "q75"),
+          meanClose: meanAt(forecast, index),
         });
       });
     } else if (forming) {
@@ -757,6 +902,8 @@
     ctx.fillRect(scene.boundaryX, priceTop, width - scene.boundaryX - scene.pad.r + 6, priceBottom - priceTop);
     const range = priceRange(scene.bars);
     drawGrid(ctx, scene, width, priceTop, priceBottom, range);
+    drawBand(ctx, scene.bars, priceTop, priceBottom, range);
+    drawMeanLine(ctx, scene.bars, priceTop, priceBottom, range);
     scene.bars.forEach((bar) => {
       if (bar.actual) drawCandle(ctx, bar.x, bar.slot, bar.actual, priceTop, priceBottom, range, "actual");
       if (bar.observed) drawCandle(ctx, bar.x, bar.slot, bar.observed, priceTop, priceBottom, range, "observed");
@@ -852,6 +999,18 @@
     }
   };
 
+  function bandAt(forecast, index, key) {
+    if (!forecast || !Array.isArray(forecast.band) || !forecast.band[index]) return null;
+    const value = forecast.band[index][key];
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function meanAt(forecast, index) {
+    if (!forecast || !Array.isArray(forecast.mean_path) || !forecast.mean_path[index]) return null;
+    const value = forecast.mean_path[index].close;
+    return Number.isFinite(value) ? value : null;
+  }
+
   function sampleAt(forecast, index) {
     if (!forecast || forecast.sample_count < 2 || !Array.isArray(forecast.sample_closes)) return null;
     const closes = forecast.sample_closes.map((series) => series[index] && series[index].close);
@@ -870,6 +1029,12 @@
       (bar.samples || []).forEach((close) => {
         low = Math.min(low, close);
         high = Math.max(high, close);
+      });
+      [bar.q10, bar.q90, bar.meanClose].forEach((value) => {
+        if (Number.isFinite(value)) {
+          low = Math.min(low, value);
+          high = Math.max(high, value);
+        }
       });
     });
     if (!Number.isFinite(low) || !Number.isFinite(high) || low === high) {
@@ -951,6 +1116,45 @@
     ctx.lineTo(x, yLow);
     ctx.stroke();
     ctx.strokeRect(x - width / 2, bodyTop, width, bodyH);
+    ctx.restore();
+  }
+
+  function drawBand(ctx, bars, top, bottom, range) {
+    const points = bars.filter((bar) => Number.isFinite(bar.q10) && Number.isFinite(bar.q90));
+    if (points.length < 2) return;
+    const paint = (lowKey, highKey, color) => {
+      ctx.beginPath();
+      points.forEach((bar, index) => {
+        const y = yOf(bar[highKey], top, bottom, range);
+        if (index === 0) ctx.moveTo(bar.x, y);
+        else ctx.lineTo(bar.x, y);
+      });
+      for (let index = points.length - 1; index >= 0; index -= 1) {
+        ctx.lineTo(points[index].x, yOf(points[index][lowKey], top, bottom, range));
+      }
+      ctx.closePath();
+      ctx.fillStyle = color;
+      ctx.fill();
+    };
+    ctx.save();
+    paint("q10", "q90", "rgba(94, 224, 208, 0.10)");
+    paint("q25", "q75", "rgba(94, 224, 208, 0.16)");
+    ctx.restore();
+  }
+
+  function drawMeanLine(ctx, bars, top, bottom, range) {
+    const points = bars.filter((bar) => Number.isFinite(bar.meanClose));
+    if (points.length < 2) return;
+    ctx.save();
+    ctx.strokeStyle = "rgba(230, 195, 106, 0.9)";
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    points.forEach((bar, index) => {
+      const y = yOf(bar.meanClose, top, bottom, range);
+      if (index === 0) ctx.moveTo(bar.x, y);
+      else ctx.lineTo(bar.x, y);
+    });
+    ctx.stroke();
     ctx.restore();
   }
 

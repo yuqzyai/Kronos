@@ -14,6 +14,8 @@ import sys
 import traceback
 from pathlib import Path
 
+import pandas as pd
+
 from flask import Flask, jsonify, render_template, request
 from werkzeug.exceptions import RequestEntityTooLarge
 
@@ -24,6 +26,9 @@ WEB_DIR = Path(__file__).resolve().parent
 if str(WEB_DIR) not in sys.path:
     sys.path.insert(0, str(WEB_DIR))
 
+from context import build_market_context  # noqa: E402
+from derivatives import FuturesClient  # noqa: E402
+from evaluate import checkpoint_origins, forecast_record, walk_forward  # noqa: E402
 from market import INTERVALS, MarketDataError, BinanceClient, csv_series  # noqa: E402
 from service import (  # noqa: E402
     DEFAULT_LOOKBACK,
@@ -36,6 +41,7 @@ from service import (  # noqa: E402
     UPLOAD_DIR,
     ApiError,
     DatasetStore,
+    JobManager,
     ModelService,
     SessionLog,
     dataset_payload,
@@ -48,15 +54,17 @@ from service import (  # noqa: E402
 )
 
 
-def create_app(binance: BinanceClient | None = None, store: DatasetStore | None = None, models: ModelService | None = None) -> Flask:
+def create_app(binance: BinanceClient | None = None, store: DatasetStore | None = None, models: ModelService | None = None, futures: FuturesClient | None = None) -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
     app.config["MAX_CONTENT_LENGTH"] = 8 * 1024 * 1024
     app.config["TEMPLATES_AUTO_RELOAD"] = True
     app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
     app.config["BINANCE"] = binance or BinanceClient()
+    app.config["FUTURES"] = futures or FuturesClient()
     app.config["STORE"] = store or DatasetStore()
     app.config["MODELS"] = models or ModelService()
     app.config["LOG"] = SessionLog()
+    app.config["JOBS"] = JobManager(app.config["MODELS"], app.config["LOG"])
     app.config["PROBE"] = None
 
     @app.errorhandler(ApiError)
@@ -141,7 +149,7 @@ def create_app(binance: BinanceClient | None = None, store: DatasetStore | None 
     @app.post("/api/datasets/sample")
     def load_sample():
         series, label = load_official_sample()
-        dataset = app.config["STORE"].put(series, label)
+        dataset = _remember(app, series, label)
         app.config["LOG"].add(
             f"Loaded official sample · {len(series.frame)} closed candles · {series.interval_label} · not live"
         )
@@ -151,7 +159,7 @@ def create_app(binance: BinanceClient | None = None, store: DatasetStore | None 
     def load_local():
         body = request.get_json(silent=True) or {}
         series, label = load_local_file(str(body.get("id", "")))
-        dataset = app.config["STORE"].put(series, label)
+        dataset = _remember(app, series, label)
         app.config["LOG"].add(f"Loaded local CSV {label} · {len(series.frame)} closed candles · not live")
         return jsonify(dataset_payload(dataset))
 
@@ -180,7 +188,7 @@ def create_app(binance: BinanceClient | None = None, store: DatasetStore | None 
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         stored_name = _storage_name(filename)
         (UPLOAD_DIR / stored_name).write_text(text, encoding="utf-8")
-        dataset = app.config["STORE"].put(series, filename)
+        dataset = _remember(app, series, filename)
         app.config["LOG"].add(f"Loaded CSV {filename} · {len(series.frame)} closed candles · not live")
         return jsonify(dataset_payload(dataset))
 
@@ -201,7 +209,7 @@ def create_app(binance: BinanceClient | None = None, store: DatasetStore | None 
             force=bool(body.get("force", False)),
         )
         label = f"{series.symbol} · {series.interval}"
-        dataset = app.config["STORE"].put(series, label)
+        dataset = _remember(app, series, label)
         cache = " · cache" if series.from_cache else ""
         forming = " · forming candle excluded" if series.forming else " · no forming candle in this response"
         app.config["LOG"].add(
@@ -238,14 +246,93 @@ def create_app(binance: BinanceClient | None = None, store: DatasetStore | None 
         requested = body.get("dataset_id")
         if requested != current.id:
             raise ApiError("The loaded dataset does not match this forecast request. Load the data again, then forecast.")
-        result = app.config["MODELS"].forecast(current, body)
+        started = app.config["JOBS"].start(current, body)
+        started["log"] = app.config["LOG"].events
+        return jsonify(started)
+
+    @app.get("/api/forecast/jobs/<job_id>")
+    def forecast_job(job_id):
+        payload = app.config["JOBS"].get(job_id)
+        payload["log"] = app.config["LOG"].events
+        return jsonify(payload)
+
+    @app.post("/api/forecast/jobs/<job_id>/cancel")
+    def cancel_forecast(job_id):
+        payload = app.config["JOBS"].cancel(job_id)
+        payload["log"] = app.config["LOG"].events
+        return jsonify(payload)
+
+    @app.get("/api/forecast/jobs/<job_id>/record")
+    def forecast_record_route(job_id):
+        job = app.config["JOBS"].jobs.get(job_id)
+        if job is None:
+            raise ApiError("No forecast with that id is on this server.", 404)
+        if job["status"] != "done" or not job.get("result"):
+            raise ApiError("A forecast record is available after the run finishes. A cancelled run is not exported as a result.")
+        snapshot = job.get("snapshot") or {}
+        return jsonify(forecast_record(job["result"], snapshot.get("meta") or {}, snapshot.get("context") or {}))
+
+    @app.post("/api/evaluate")
+    def evaluate():
+        body = request.get_json(silent=True) or {}
+        current = app.config["STORE"].current
+        if current is None:
+            raise ApiError("No dataset is loaded. Load Binance candles, the official sample, or a CSV file first.")
+        info = app.config["MODELS"].info
+        predictor = app.config["MODELS"].predictor
+        if info is None or predictor is None:
+            raise ApiError("Load the model first. The check compares Kronos with persistence and does not run without it.")
+        try:
+            checkpoints = int(body.get("checkpoints", 2))
+        except (TypeError, ValueError) as exc:
+            raise ApiError("Checkpoints must be a whole number from 1 to 3.") from exc
+        pred_len = min(24, max(1, int(body.get("pred_len", DEFAULT_PRED_LEN))))
+        room = len(current.series.frame) - pred_len
+        lookback = min(int(body.get("lookback", DEFAULT_LOOKBACK)), info.context_length, room)
+        try:
+            checkpoint_origins(len(current.series.frame), lookback, pred_len, checkpoints)
+        except ValueError as exc:
+            raise ApiError(str(exc)) from exc
+        frame = current.series.frame.copy()
+
+        def forecaster(history):
+            return _kronos_eval_forecast(predictor, history, pred_len)
+
+        report = walk_forward(frame, forecaster, lookback, pred_len, checkpoints)
+        report["model"] = {"name": info.name, "device": info.device}
+        report["settings"] = {"lookback": lookback, "pred_len": pred_len, "checkpoints": checkpoints, "samples": 1}
         app.config["LOG"].add(
-            f"Forecast {result['mode']} · {result['horizon_text']} · {result['aggregation'].replace('_', ' ')} · {result['elapsed_seconds']:.1f}s"
+            f"Walk-forward · {checkpoints} checkpoints · median MAE {report['kronos_median_mae']:.6g} · persistence MAE {report['persistence_mae']:.6g}"
         )
-        result["log"] = app.config["LOG"].events
-        return jsonify(result)
+        report["log"] = app.config["LOG"].events
+        return jsonify(report)
 
     return app
+
+
+def _remember(app: Flask, series, label):
+    futures = app.config["FUTURES"] if series.source == "binance" else None
+    client = app.config["BINANCE"] if series.source == "binance" else None
+    context = build_market_context(series, client, futures)
+    return app.config["STORE"].put(series, label, context)
+
+
+def _kronos_eval_forecast(predictor, history, pred_len: int) -> dict:
+    step = history["timestamps"].sort_values().diff().dropna().median()
+    if pd.isna(step) or step <= pd.Timedelta(0):
+        raise ApiError("The checkpoint history has no positive spacing, so future timestamps were not invented.")
+    last = pd.Timestamp(history["timestamps"].iloc[-1])
+    future = pd.DatetimeIndex([last + step * (i + 1) for i in range(pred_len)])
+    columns = [column for column in ("open", "high", "low", "close", "volume", "amount") if column in history.columns]
+    pred = predictor.predict(
+        df=history[columns].reset_index(drop=True),
+        x_timestamp=pd.Series(pd.DatetimeIndex(history["timestamps"]), name="timestamps"),
+        y_timestamp=pd.Series(future, name="timestamps"),
+        pred_len=pred_len,
+        sample_count=1,
+        verbose=False,
+    )
+    return {"median_closes": pred["close"].astype(float).to_list()}
 
 
 def _probe(app: Flask) -> dict:

@@ -2,7 +2,7 @@
 
 A localhost interface for the Kronos candlestick model. It loads real candles, loads a public Kronos checkpoint, and draws the model's own forecast. It does not place orders, keep an account, or invent prices when a feed fails.
 
-The model code is unchanged. Sampling still goes through `KronosPredictor.predict`.
+`predict` still returns the mean of its internal samples. The UI also asks the same sampler for the individual paths, in batches of 4, and draws their empirical median. That does not change the model weights.
 
 ## Run
 
@@ -28,9 +28,15 @@ The server binds to `127.0.0.1` only. The Flask debugger and the reloader are of
 
 Auto device selection uses Apple Silicon MPS when that PyTorch process actually has it, then CUDA if MPS is absent, otherwise CPU.
 
-One sample is one path. If you ask for 2–4 samples, each one is a separate `predict(..., sample_count=1)` call. The candles are the arithmetic mean of those draws, and each draw is a line. That spread is not a calibrated confidence interval. Temperature and top-p only change token sampling. They are behind the Sampling disclosure.
+The default run draws 8 paths, in batches of 4, with a cap of 16. The candles are the empirical median. The mean is separate, and a few paths are traced. The band is model sample dispersion, not a calibrated confidence interval and not a probability of profit. More paths reduce sampler noise. They are not evidence the median is closer to the future price. One path draws no band. Temperature and top-p only change token sampling.
 
-Forward mode continues after the last closed candle. Held-out mode forecasts the last horizon candles already in the file and reports close-price MAE, RMSE, and MAPE against those later candles. That is an error on this file, not a trading result.
+Forward mode continues after the last closed candle. Held-out mode forecasts the last horizon candles already in the file and reports close-price MAE, RMSE, and MAPE of the median path against those later candles. That is an error on this file, not a trading result.
+
+Higher timeframes are closed-candle measurements aligned to the base as-of. For Binance they are separate public kline requests. For a file they are clock bins that end at or before the as-of. They are not forecasts and they are not a score.
+
+USD-M funding, open interest, and taker buy/sell volume come only from `https://fapi.binance.com`. If that host is blocked, the panel says so and leaves the fields empty. Spot taker-buy share, when the kline response includes it, is quote-volume executed by taker buys. Order-book depth is not shown.
+
+A walk-forward check compares one Kronos sample per checkpoint with a persistence forecast on this file. The public weights' training end is not known here. Context overlays are not inputs, so they cannot change that error.
 
 ## Binance spot
 
@@ -60,7 +66,7 @@ Uploads are stored under `webui/uploads/` and are limited to 8 MB and 50,000 row
 From the repository root:
 
 ```bash
-python -m pytest tests/test_webui.py tests/test_webui_binance_live.py
+python -m pytest tests/test_webui.py tests/test_webui_context.py tests/test_webui_binance_live.py
 ```
 
 `tests/test_webui.py` uses a fake predictor and a fake HTTP client. `tests/test_webui_binance_live.py` performs one real public request. Neither test downloads model weights.

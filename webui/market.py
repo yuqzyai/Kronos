@@ -218,7 +218,7 @@ def parse_kline_row(row: object, index: int) -> dict:
     _check_ohlc(open_, high, low, close, index)
     if close_ms < open_ms:
         raise MarketDataError(f"Row {index}: close time is earlier than open time.")
-    return {
+    parsed = {
         "open_time_ms": open_ms,
         "close_time_ms": close_ms,
         "open": open_,
@@ -228,6 +228,23 @@ def parse_kline_row(row: object, index: int) -> dict:
         "volume": volume,
         "amount": amount,
     }
+    if len(row) >= 11:
+        try:
+            taker_base = float(row[9])
+            taker_quote = float(row[10])
+        except (TypeError, ValueError):
+            taker_base = taker_quote = None
+        if (
+            taker_base is not None
+            and taker_quote is not None
+            and math.isfinite(taker_base)
+            and math.isfinite(taker_quote)
+            and taker_base >= 0
+            and taker_quote >= 0
+        ):
+            parsed["taker_buy_base"] = taker_base
+            parsed["taker_buy_quote"] = taker_quote
+    return parsed
 
 
 def split_closed_candles(rows: object, now: datetime) -> tuple[list[dict], dict | None, list[str]]:
@@ -264,8 +281,12 @@ def frame_from_closed(closed: list[dict]) -> pd.DataFrame:
             "close": [row["close"] for row in closed],
             "volume": [row["volume"] for row in closed],
             "amount": [row["amount"] for row in closed],
+            "close_time": pd.to_datetime([row["close_time_ms"] for row in closed], unit="ms", utc=True),
         }
     )
+    if any("taker_buy_quote" in row for row in closed):
+        frame["taker_buy_base"] = [row.get("taker_buy_base") for row in closed]
+        frame["taker_buy_quote"] = [row.get("taker_buy_quote") for row in closed]
     return frame
 
 

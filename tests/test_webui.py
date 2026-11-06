@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import time
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
@@ -340,6 +341,17 @@ def test_server_stays_on_localhost_with_the_debugger_off():
     assert options["use_reloader"] is False
 
 
+def _wait_job(client, job_id):
+    for _ in range(100):
+        payload = client.get(f"/api/forecast/jobs/{job_id}").get_json()
+        if payload["status"] == "done":
+            return payload["result"]
+        if payload["status"] in {"error", "cancelled"}:
+            raise AssertionError(payload)
+        time.sleep(0.02)
+    raise AssertionError("forecast job did not finish")
+
+
 def test_forecast_requires_a_loaded_dataset_and_one_sample_is_one_path():
     app = _ready_app()
     client = app.test_client()
@@ -359,7 +371,7 @@ def test_forecast_requires_a_loaded_dataset_and_one_sample_is_one_path():
         json={"dataset_id": dataset_id, "lookback": 32, "pred_len": 4, "sample_count": 1, "mode": "forward"},
     )
     assert single.status_code == 200
-    forecast = single.get_json()
+    forecast = _wait_job(client, single.get_json()["job_id"])
     assert forecast["aggregation"] == "single_sample"
     assert forecast["sample_closes"] is None
     assert len(forecast["path"]) == 4
@@ -371,8 +383,11 @@ def test_forecast_requires_a_loaded_dataset_and_one_sample_is_one_path():
         json={"dataset_id": dataset_id, "lookback": 32, "pred_len": 4, "sample_count": 3, "mode": "held_out"},
     )
     assert many.status_code == 200
-    compared = many.get_json()
-    assert compared["aggregation"] == "mean_of_independent_samples"
+    compared = _wait_job(client, many.get_json()["job_id"])
+    assert compared["aggregation"] == "median_of_model_samples"
+    assert compared["terminal"]["samples"] == 3
+    assert compared["dispersion_label"] == "model sample dispersion"
+    assert "probability of profit" in compared["note"]
     assert len(compared["sample_closes"]) == 3
     assert len(compared["actuals"]) == 4
     assert compared["error_stats"]["note"].startswith("Close-price error")
@@ -402,7 +417,7 @@ def test_runtime_defaults_to_base_and_cpu_without_torch_mps():
     assert payload["defaults"]["model_key"] == "kronos-base"
     assert payload["defaults"]["lookback"] == 400
     assert payload["defaults"]["pred_len"] == 24
-    assert payload["defaults"]["sample_count"] == 1
+    assert payload["defaults"]["sample_count"] == 8
     assert payload["server"]["host"] == "127.0.0.1"
     assert payload["server"]["debug"] is False
     assert "mps" not in payload["devices"]["options"] or payload["devices"]["resolved_auto"] == "mps"

@@ -227,6 +227,25 @@ input[type="range"] { width: 100%; accent-color: var(--cyan); }
   background: #071214;
 }
 #run-reason { min-height: 2.6em; }
+.check-result {
+  margin-top: 8px;
+  white-space: pre-wrap;
+  color: var(--muted);
+  font-size: 11px;
+  max-height: 140px;
+  overflow: auto;
+}
+.context-block { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--line); }
+.context-block h3 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 600;
+}
+.context-block p { color: var(--ink); margin: 0 0 4px; }
+.context-block .reason { color: #ffb4bc; }
 
 .stage {
   min-height: 0;

@@ -111,14 +111,29 @@
           <button type="button" class="primary" id="load-model">Load model</button>
           <details id="advanced">
             <summary>Sampling</summary>
-            <p class="hint">Temperature and top-p change how the next token is drawn. They are not a confidence score. Extra samples are separate full forecasts, not a fan invented from one average.</p>
+            <p class="hint">Temperature and top-p change how the next token is drawn. They are not a confidence score. Each sample is one full stochastic path from the model. The candles are the empirical median. The mean is shown separately. More paths reduce sampler noise. They are not evidence the median is closer to the future price.</p>
             <label for="temperature">Temperature <span id="temperature-value">1.0</span></label>
             <input id="temperature" type="range" min="0.1" max="2" step="0.1" value="1">
             <label for="top-p">top_p <span id="top-p-value">0.9</span></label>
             <input id="top-p" type="range" min="0.5" max="1" step="0.05" value="0.9">
             <label for="samples">Independent samples</label>
-            <input id="samples" type="number" min="1" max="4" step="1" value="1" inputmode="numeric">
-            <p class="hint">1 draws one path. 2–4 draw that many paths and average them into the candles. The average is not shown as several futures.</p>
+            <input id="samples" type="number" min="1" max="16" step="1" value="8" inputmode="numeric">
+            <p class="hint">Default 8, cap 16, drawn in batches of 4. The cap is a memory and time limit for a 16 GB machine, not a tuned accuracy setting. One path draws no dispersion band.</p>
+          </details>
+        </section>
+
+        <section>
+          <details id="context-drawer">
+            <summary>Higher timeframes and perpetual context</summary>
+            <p class="hint">Closed bars only, aligned to the base as-of. These readings are not model forecasts and they are not combined into a score. A blocked futures host stays empty.</p>
+            <div id="context-body"></div>
+          </details>
+          <details id="check-drawer">
+            <summary>Walk-forward check</summary>
+            <p class="hint">Two or three checkpoints on this file, compared with a forecast that repeats the last close. One sample per checkpoint. Higher-timeframe and perpetual readings are not inputs, so they cannot change the error. The training cutoff of the public weights is unknown. A lower error here is not a general accuracy claim.</p>
+            <button type="button" class="ghost" id="run-check">Run 2 checkpoints</button>
+            <button type="button" class="ghost" id="export-record">Download forecast record</button>
+            <pre id="check-result" class="check-result"></pre>
           </details>
         </section>
 
@@ -134,6 +149,8 @@
       </div>
       <div class="rail-foot">
         <button type="button" class="forecast" id="run" disabled>Run forecast</button>
+        <p class="hint" id="progress" hidden></p>
+        <button type="button" class="ghost" id="cancel" hidden>Cancel</button>
         <p class="hint" id="run-reason">Load data and the model first.</p>
       </div>
     </aside>

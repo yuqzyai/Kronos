@@ -12,6 +12,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "webui"))
 
+import pandas as pd
+
+from derivatives import FuturesClient  # noqa: E402
 from market import PRIMARY_HOST, BinanceClient, MarketDataError  # noqa: E402
 
 
@@ -30,3 +33,20 @@ def test_live_public_spot_klines():
     assert str(series.frame["timestamps"].dt.tz) == "UTC"
     if series.forming is not None:
         assert series.forming["closed"] is False
+
+
+def test_live_usd_m_context_is_real_or_an_explicit_block():
+    """One real call to fapi.binance.com. A geo block must stay empty, not zero-filled."""
+
+    result = FuturesClient().context_for_spot("BTCUSDT", "1h", pd.Timestamp("2026-11-06T18:00:00Z"))
+    if result["status"] == "unavailable":
+        assert result["funding"] is None
+        assert result["open_interest"] is None
+        assert result["taker"] is None
+        assert result["http_status"] in {403, 451, None}
+        assert "fapi.binance.com" in result["reason"]
+        return
+    assert result["status"] == "ok"
+    assert result["host"] == "fapi.binance.com"
+    assert result["funding"]["status"] == "ok"
+    assert result["funding"]["latest"]["funding_rate"] is not None

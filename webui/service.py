@@ -1,8 +1,8 @@
 """Dataset, model, and forecast orchestration for the local Kronos web UI.
 
-Forecasting calls KronosPredictor.predict with sample_count=1. A request for
-several samples repeats that call. The chart can then show those draws and
-their average. It does not turn one average into several paths.
+Forecast jobs draw independent Kronos paths, in batches when the model can
+return them, and the chart emphasizes their empirical median. More paths
+describe the sampler. They are not evidence of a better forecast.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from ensemble import is_memory_error, summarize_paths
 from market import CandleSeries, describe_horizon
 
 
@@ -32,8 +33,9 @@ DEFAULT_LOOKBACK = 400
 DEFAULT_PRED_LEN = 24
 DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TOP_P = 0.9
-DEFAULT_SAMPLES = 1
-MAX_SAMPLES = 4
+DEFAULT_SAMPLES = 8
+MAX_SAMPLES = 16
+SAMPLE_BATCH = 4
 
 MODELS = {
     "kronos-mini": {
@@ -78,6 +80,7 @@ class LoadedDataset:
     id: str
     series: CandleSeries
     label: str
+    context: dict | None = None
 
 
 @dataclass
@@ -106,8 +109,8 @@ class DatasetStore:
     def __init__(self):
         self.current: LoadedDataset | None = None
 
-    def put(self, series: CandleSeries, label: str) -> LoadedDataset:
-        loaded = LoadedDataset(id=secrets.token_hex(8), series=series, label=label)
+    def put(self, series: CandleSeries, label: str, context: dict | None = None) -> LoadedDataset:
+        loaded = LoadedDataset(id=secrets.token_hex(8), series=series, label=label, context=context or {})
         self.current = loaded
         return loaded
 
@@ -119,6 +122,7 @@ class ModelService:
         self.info: ModelInfo | None = None
         self.busy: str | None = None
         self.import_error: str | None = None
+        self.sample_batch = SAMPLE_BATCH
 
     def status(self) -> dict:
         with self.lock:
@@ -196,7 +200,7 @@ class ModelService:
             with self.lock:
                 self.busy = None
 
-    def forecast(self, dataset: LoadedDataset, params: dict) -> dict:
+    def forecast(self, dataset: LoadedDataset, params: dict, progress=None, cancel_event=None) -> dict:
         with self.lock:
             if self.busy:
                 raise ApiError("The model is busy. Wait for the current load or forecast to finish.", 409)
@@ -205,9 +209,16 @@ class ModelService:
             if predictor is None or info is None:
                 raise ApiError("Load the model first. Data can be on the chart before the weights are loaded.")
             self.busy = "forecasting"
-        started = time.perf_counter()
         try:
-            return _run_forecast(predictor, info, dataset, params)
+            return _run_forecast(
+                predictor,
+                info,
+                dataset,
+                params,
+                progress=progress,
+                cancel_event=cancel_event,
+                sample_batch=self.sample_batch,
+            )
         finally:
             with self.lock:
                 self.busy = None
@@ -339,7 +350,7 @@ def candle_records(dataset: LoadedDataset) -> list[dict]:
 
 
 def dataset_payload(dataset: LoadedDataset) -> dict:
-    return {"dataset": metadata(dataset), "candles": candle_records(dataset)}
+    return {"dataset": metadata(dataset), "candles": candle_records(dataset), "context": dataset.context or {}}
 
 
 def list_local_files() -> list[dict]:
@@ -425,7 +436,11 @@ def _csv_children(root: Path, kind: str) -> list[dict]:
     return items
 
 
-def _run_forecast(predictor, info: ModelInfo, dataset: LoadedDataset, params: dict) -> dict:
+class ForecastCancelled(Exception):
+    pass
+
+
+def _run_forecast(predictor, info: ModelInfo, dataset: LoadedDataset, params: dict, progress=None, cancel_event=None, sample_batch=SAMPLE_BATCH) -> dict:
     started = time.perf_counter()
     lookback = _parse_int(params.get("lookback", DEFAULT_LOOKBACK), "Context", MIN_LOOKBACK, info.context_length)
     pred_len = _parse_int(params.get("pred_len", DEFAULT_PRED_LEN), "Horizon", 1, MAX_PRED_LEN)
@@ -440,40 +455,35 @@ def _run_forecast(predictor, info: ModelInfo, dataset: LoadedDataset, params: di
             f"Context {lookback} is above {info.name}'s maximum of {info.context_length}. "
             "The extra rows were not truncated in secret."
         )
-    frame = dataset.series.frame
+    frame = dataset.series.frame.copy()
     window = _window(frame, dataset.series, lookback, pred_len, mode)
     columns = [column for column in ("open", "high", "low", "close", "volume", "amount") if column in window.input_frame.columns]
     x_df = window.input_frame[columns].reset_index(drop=True)
     x_timestamp = pd.Series(pd.DatetimeIndex(window.input_frame["timestamps"]), name="timestamps")
     y_timestamp = pd.Series(pd.DatetimeIndex(window.future_index), name="timestamps")
-    samples = []
-    for _ in range(sample_count):
-        pred_df = predictor.predict(
-            df=x_df,
-            x_timestamp=x_timestamp,
-            y_timestamp=y_timestamp,
-            pred_len=pred_len,
-            T=temperature,
-            top_k=0,
-            top_p=top_p,
-            sample_count=1,
-            verbose=False,
-        )
-        samples.append(_frame_records(pred_df, window.future_index))
+    if progress:
+        progress(0, sample_count)
+    samples, batch_notes = _collect_samples(
+        predictor, x_df, x_timestamp, y_timestamp, pred_len, temperature, top_p,
+        sample_count, max(1, int(sample_batch)), window.future_index, progress, cancel_event,
+    )
+    last_close = float(window.input_frame["close"].iloc[-1])
+    summary = summarize_paths(samples, last_close)
     if sample_count == 1:
         path = samples[0]
         aggregation = "single_sample"
-        sample_closes = None
-        note = "One call to KronosPredictor.predict with sample_count=1. The candles are that single path, not an ensemble drawn as extra futures."
+        note = "One stochastic path from the Kronos sampler. With one path the median is that path, so no dispersion band is drawn."
     else:
-        path = _average_paths(samples)
-        aggregation = "mean_of_independent_samples"
-        sample_closes = [[{"time": row["time"], "close": row["close"]} for row in sample] for sample in samples]
+        path = summary["median_path"]
+        aggregation = "median_of_model_samples"
+        how = "batched by the model sampler" if hasattr(predictor, "sample_paths") else "one model call per path"
         note = (
-            f"{sample_count} separate calls to KronosPredictor.predict with sample_count=1. "
-            "Each thin line is one of those draws. The candles are their arithmetic mean. "
-            "The spread is not a calibrated confidence interval."
+            f"{sample_count} independent paths ({how}). Candles are the empirical median. The mean is separate. "
+            "The shaded band is model sample dispersion, not a calibrated confidence interval and not a probability of profit. "
+            "More paths reduce sampler noise. They are not evidence that the median is closer to the future price."
         )
+    if batch_notes:
+        note = f"{note} {' '.join(batch_notes)}"
     actual_records = None
     error_stats = None
     if window.actual_frame is not None:
@@ -494,7 +504,15 @@ def _run_forecast(predictor, info: ModelInfo, dataset: LoadedDataset, params: di
         "boundary_open": _iso(window.boundary_open),
         "forecast_opens_at": path[0]["time"] if path else None,
         "path": path,
-        "sample_closes": sample_closes,
+        "mean_path": summary["mean_path"],
+        "band": summary["band"],
+        "sample_closes": summary["traces"],
+        "traces_shown": summary["traces_shown"],
+        "traces_total": summary["traces_total"],
+        "ohlc_repairs": summary["ohlc_repairs"],
+        "terminal": summary["terminal"],
+        "dispersion_label": "model sample dispersion",
+        "batch_size": max(1, int(sample_batch)),
         "actuals": actual_records,
         "error_stats": error_stats,
         "elapsed_seconds": elapsed,
@@ -510,8 +528,153 @@ def _run_forecast(predictor, info: ModelInfo, dataset: LoadedDataset, params: di
             "rows": lookback,
             "first_open": _iso(window.input_frame["timestamps"].iloc[0]),
             "last_open": _iso(window.boundary_open),
-            "last_close_price": float(window.input_frame["close"].iloc[-1]),
+            "last_close_price": last_close,
         },
+    }
+
+
+def _collect_samples(predictor, x_df, x_timestamp, y_timestamp, pred_len, temperature, top_p, sample_count, sample_batch, future_index, progress, cancel_event):
+    samples = []
+    notes = []
+    batch = sample_batch
+    while len(samples) < sample_count:
+        if cancel_event is not None and cancel_event.is_set():
+            raise ForecastCancelled("The forecast was cancelled. Partial paths were not drawn.")
+        size = min(batch, sample_count - len(samples))
+        try:
+            drawn = _draw_batch(predictor, x_df, x_timestamp, y_timestamp, pred_len, temperature, top_p, size, future_index)
+        except RuntimeError as exc:
+            if size > 1 and is_memory_error(exc):
+                batch = 1
+                notes.append(
+                    "A batched draw ran out of memory. The rest of the paths were drawn one at a time. The model was not changed."
+                )
+                continue
+            raise
+        if len(drawn) != size:
+            raise ApiError(f"The sampler returned {len(drawn)} paths for a batch of {size}. The result was discarded.")
+        samples.extend(drawn)
+        if progress:
+            progress(len(samples), sample_count)
+    return samples, notes
+
+
+def _draw_batch(predictor, x_df, x_timestamp, y_timestamp, pred_len, temperature, top_p, size, future_index):
+    if hasattr(predictor, "sample_paths"):
+        frames = predictor.sample_paths(
+            df=x_df,
+            x_timestamp=x_timestamp,
+            y_timestamp=y_timestamp,
+            pred_len=pred_len,
+            T=temperature,
+            top_k=0,
+            top_p=top_p,
+            sample_count=size,
+            verbose=False,
+        )
+        return [_frame_records(frame, future_index) for frame in frames]
+    drawn = []
+    for _ in range(size):
+        frame = predictor.predict(
+            df=x_df,
+            x_timestamp=x_timestamp,
+            y_timestamp=y_timestamp,
+            pred_len=pred_len,
+            T=temperature,
+            top_k=0,
+            top_p=top_p,
+            sample_count=1,
+            verbose=False,
+        )
+        drawn.append(_frame_records(frame, future_index))
+    return drawn
+
+
+class JobManager:
+    def __init__(self, models: ModelService, log: SessionLog):
+        self.models = models
+        self.log = log
+        self._lock = threading.Lock()
+        self.jobs: dict[str, dict] = {}
+        self.active_id: str | None = None
+
+    def start(self, dataset: LoadedDataset, params: dict) -> dict:
+        with self._lock:
+            active = self.jobs.get(self.active_id) if self.active_id else None
+            if active and active["status"] == "running":
+                raise ApiError("A forecast is already running. Cancel it or wait for it to finish.", 409)
+            try:
+                total = int(params.get("sample_count", DEFAULT_SAMPLES))
+            except (TypeError, ValueError):
+                total = DEFAULT_SAMPLES
+            job_id = secrets.token_hex(8)
+            job = {
+                "id": job_id,
+                "status": "running",
+                "completed": 0,
+                "total": total,
+                "cancel": threading.Event(),
+                "result": None,
+                "error": None,
+                "dataset_id": dataset.id,
+                "snapshot": {"meta": metadata(dataset), "context": dataset.context or {}},
+            }
+            self.jobs[job_id] = job
+            self.active_id = job_id
+        thread = threading.Thread(target=self._run, args=(job, dataset, dict(params)), daemon=True)
+        thread.start()
+        return {"job_id": job_id, "status": "running", "total": total}
+
+    def get(self, job_id: str) -> dict:
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise ApiError("No forecast with that id is on this server.", 404)
+        return _public_job(job)
+
+    def cancel(self, job_id: str) -> dict:
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise ApiError("No forecast with that id is on this server.", 404)
+        job["cancel"].set()
+        return _public_job(job)
+
+    def _run(self, job: dict, dataset: LoadedDataset, params: dict) -> None:
+        def progress(done, total):
+            job["completed"] = done
+            job["total"] = total
+
+        try:
+            result = self.models.forecast(dataset, params, progress=progress, cancel_event=job["cancel"])
+            job["result"] = result
+            job["status"] = "done"
+            job["completed"] = result["sample_count"]
+            self.log.add(
+                f"Forecast {result['mode']} · {result['horizon_text']} · {result['aggregation'].replace('_', ' ')} · {result['elapsed_seconds']:.1f}s"
+            )
+        except ForecastCancelled as exc:
+            job["status"] = "cancelled"
+            job["result"] = None
+            job["error"] = str(exc)
+            self.log.add(f"Forecast cancelled · {job['completed']} of {job['total']} samples · chart left unchanged")
+        except Exception as exc:
+            job["status"] = "error"
+            job["error"] = str(exc)
+            self.log.add(f"Forecast failed · {exc}")
+        finally:
+            with self._lock:
+                if self.active_id == job["id"]:
+                    self.active_id = None
+
+
+def _public_job(job: dict) -> dict:
+    return {
+        "id": job["id"],
+        "status": job["status"],
+        "completed": job["completed"],
+        "total": job["total"],
+        "result": job["result"],
+        "error": job["error"],
+        "dataset_id": job["dataset_id"],
     }
 
 
