@@ -7,12 +7,30 @@
     candles: [],
     forecast: null,
     context: null,
+    showPaths: storedFlag("kronos-show-paths"),
+    showBand: storedFlag("kronos-show-band"),
     jobId: null,
     progressText: "",
     log: [],
     busy: null,
     source: "binance",
   };
+
+  function storedFlag(key) {
+    try {
+      return sessionStorage.getItem(key) === "1";
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function storeFlag(key, value) {
+    try {
+      sessionStorage.setItem(key, value ? "1" : "0");
+    } catch (_error) {
+      /* private mode can reject storage; the toggle still applies to this view */
+    }
+  }
 
   const el = (id) => document.getElementById(id);
   const chart = new PriceChart(el("chart"));
@@ -199,7 +217,7 @@
       summary.textContent = "No candles loaded. Load Binance spot candles, the official sample, or a CSV file.";
     } else {
       const forecastText = state.forecast
-        ? ` Forecast: ${state.forecast.horizon_text}, ${state.forecast.aggregation.replaceAll("_", " ")}.`
+        ? ` Forecast: ${state.forecast.horizon_text || ""}, ${(state.forecast.aggregation || "forecast").replaceAll("_", " ")}.`
         : " Forecast region is empty until a run finishes.";
       summary.textContent = `${dataset.label}. ${closed} closed candles. Timezone ${dataset.timezone}. ${dataset.note}${forecastText} Arrow keys move the candle readout. Shift plus arrows pan. Home returns to the latest candles.`;
     }
@@ -254,6 +272,14 @@
     figure.className = "figure";
     label.textContent = forecast.sample_count > 1 ? "Median horizon close" : "Horizon close";
     kicker.textContent = forecast.mode === "held_out" ? "Held-out" : "Forward";
+    const lead = el("forecast-lead");
+    if (lead) {
+      if (forecast.sample_count > 1 && terminal) {
+        lead.textContent = `Median close ${forecast.horizon_text} from now is ${formatPrice(terminal.median_close)}, the middle of ${forecast.sample_count} sampled paths. That is not a chance the market ends there.`;
+      } else {
+        lead.textContent = `One sampled path. Horizon close is ${formatPrice(last.close)}. A single path has no dispersion band.`;
+      }
+    }
     const rows = [
       ["Horizon", forecast.horizon_text],
       ["Opens", formatUtc(forecast.forecast_opens_at)],
@@ -338,71 +364,97 @@
     if (dataset.used_weight_1m != null) rows.push(["Weight 1m", String(dataset.used_weight_1m)]);
     rows.push(["Amount", amountLabel(dataset.amount_policy)]);
     if (dataset.warnings && dataset.warnings.length) rows.push(["Note", dataset.warnings[0]]);
-    const context = state.context;
-    if (context && context.derivatives) {
-      rows.push(["Perpetual", derivativeLine(context.derivatives)]);
-    }
-    if (context && Array.isArray(context.higher_timeframes) && context.higher_timeframes.length) {
-      rows.push(["Higher TF", context.higher_timeframes.map(higherLine).join(" · ")]);
-    }
     facts.innerHTML = factRows(rows);
   }
 
-  function derivativeLine(item) {
-    if (!item || item.status === "not_applicable") return "Not requested for this file";
-    if (item.status === "unavailable") return "Unavailable";
-    if (item.status === "not_listed") return "No USD-M perpetual";
-    if (item.status === "ok" && item.funding && item.funding.latest) {
-      return `Funding ${Number(item.funding.latest.funding_rate).toExponential(2)} at ${formatUtc(item.funding.latest.time)}`;
-    }
-    return item.status || "—";
-  }
-
-  function higherLine(item) {
-    if (!item || item.status !== "ok" || item.last_bar_return == null) return `${item && item.interval ? item.interval : "higher"} unavailable`;
-    const pct = (item.last_bar_return * 100).toFixed(2);
-    return `${item.interval} last bar ${pct}%`;
-  }
-
   function renderContext() {
-    const root = el("context-body");
-    if (!root) return;
-    const context = state.context;
-    if (!context) {
-      root.innerHTML = "<p class='hint'>Load data to see aligned context.</p>";
+    renderHigher(state.context);
+    renderPerpetual(state.context);
+  }
+
+  function renderHigher(context) {
+    const status = el("higher-status");
+    const body = el("higher-body");
+    if (!status || !body) return;
+    const rows = (context && context.higher_timeframes) || [];
+    if (!rows.length) {
+      status.textContent = "Waiting";
+      body.innerHTML = "<p>Load candles to compare slower timeframes.</p>";
       return;
     }
-    const blocks = [];
-    (context.higher_timeframes || []).forEach((item) => {
-      const title = item.interval ? `${item.interval} · ${item.interval_label || ""}` : "Higher timeframe";
+    const ready = rows.filter((item) => item.status === "ok").length;
+    status.textContent = ready ? `${ready} aligned` : "Unavailable";
+    body.innerHTML = rows.map((item) => {
+      const name = item.interval_label || item.interval || "Higher timeframe";
       if (item.status !== "ok") {
-        blocks.push(`<div class="context-block"><h3>${escapeHtml(title)}</h3><p class="reason">${escapeHtml(item.reason || item.note || "Unavailable")}</p></div>`);
-        return;
+        return `<div class="tf-row"><strong>${escapeHtml(name)}</strong><p class="status-bad">${escapeHtml(item.reason || "No aligned candles.")}</p></div>`;
       }
-      const vol = item.log_return_volatility == null ? "—" : Number(item.log_return_volatility).toFixed(4);
-      const volume = item.last_volume_over_median == null ? (item.volume_note || "—") : `${Number(item.last_volume_over_median).toFixed(2)}× median`;
-      const barReturn = item.last_bar_return == null ? "—" : `${(item.last_bar_return * 100).toFixed(2)}%`;
-      blocks.push(`<div class="context-block"><h3>${escapeHtml(title)}</h3><p>${escapeHtml(item.source || "")}. ${item.bars} closed bars through ${escapeHtml(formatUtc(item.as_of))}.</p><p>Last bar return ${barReturn}. Log-return volatility ${vol}. Volume ${escapeHtml(String(volume))}.</p><p>${escapeHtml(item.sign_vs_base_last_bar)}. ${escapeHtml(item.note || "")}</p></div>`);
-    });
-    const deriv = context.derivatives || {};
-    if (deriv.status === "ok") {
-      const fund = deriv.funding && deriv.funding.latest;
-      const oi = deriv.open_interest && deriv.open_interest.latest;
-      const taker = deriv.taker && deriv.taker.latest;
-      blocks.push(`<div class="context-block"><h3>USD-M perpetual ${escapeHtml(deriv.symbol || "")}</h3><p>${escapeHtml(deriv.perpetual && deriv.perpetual.note || "")}</p><p>Funding ${fund ? `${Number(fund.funding_rate).toExponential(3)} at ${formatUtc(fund.time)}` : "no aligned record"}.</p><p>Open interest ${oi ? `${formatPrice(oi.open_interest_contracts)} contracts at ${formatUtc(oi.time)}` : "no aligned history"}.</p><p>Taker buy share ${taker && taker.taker_buy_share != null ? `${(taker.taker_buy_share * 100).toFixed(1)}% of taker volume at ${formatUtc(taker.time)}` : "no aligned bar"}.</p></div>`);
-      if (deriv.after_as_of) {
-        blocks.push(`<div class="context-block"><h3>Snapshot after the candle as-of</h3><p>${escapeHtml(deriv.after_as_of.note)} ${formatUtc(deriv.after_as_of.time)} · ${formatPrice(deriv.after_as_of.open_interest_contracts)} contracts.</p></div>`);
-      }
-    } else {
-      blocks.push(`<div class="context-block"><h3>USD-M perpetual</h3><p class="reason">${escapeHtml(deriv.reason || "No perpetual context.")}</p><p>${deriv.checked_at ? `Checked ${escapeHtml(formatUtc(deriv.checked_at, true))}.` : ""}</p></div>`);
+      const change = item.last_bar_return;
+      const changeText = change == null ? "—" : `${change > 0 ? "+" : ""}${(change * 100).toFixed(2)}%`;
+      const changeClass = change == null ? "chg" : change >= 0 ? "chg up" : "chg down";
+      const vol = item.log_return_volatility == null ? null : `${(item.log_return_volatility * 100).toFixed(2)}%`;
+      const volume = item.last_volume_over_median == null
+        ? (item.volume_note || "Volume was not compared.")
+        : `Volume on that bar was ${Number(item.last_volume_over_median).toFixed(2)}× the median of this window.`;
+      const direction = plainDirection(item.sign_vs_base_last_bar);
+      return `<div class="tf-row"><div><strong>${escapeHtml(name)}</strong><span class="${changeClass}">${changeText}</span></div><p>Last closed bar. ${vol ? `Typical bar-to-bar move ${vol}. ` : ""}${escapeHtml(volume)} ${escapeHtml(direction)}</p><details><summary>Time and source</summary><p>${escapeHtml(item.source || "Closed candles")}. ${item.bars} bars through ${escapeHtml(formatUtc(item.as_of))}.${item.last_close_time ? ` Last bar closed ${escapeHtml(formatUtc(item.last_close_time))}.` : ""}</p></details></div>`;
+    }).join("");
+  }
+
+  function plainDirection(value) {
+    if (value === "same sign on the last closed bar") return "The last base bar moved the same way.";
+    if (value === "opposite sign on the last closed bar") return "The last base bar moved the other way.";
+    if (value === "one bar is unchanged") return "One of those bars was unchanged.";
+    return "Direction was not compared.";
+  }
+
+  function renderPerpetual(context) {
+    const status = el("perp-status");
+    const body = el("perp-body");
+    if (!status || !body) return;
+    const deriv = (context && context.derivatives) || null;
+    const spot = context && context.spot_taker;
+    if (!deriv) {
+      status.textContent = "Waiting";
+      body.innerHTML = "<p>Load a Binance spot symbol to ask the public USD-M endpoints.</p>";
+      return;
     }
-    const spot = context.spot_taker;
-    if (spot && spot.status === "ok") {
-      blocks.push(`<div class="context-block"><h3>Spot taker buys</h3><p>Last candle ${(spot.last_taker_buy_share_of_quote * 100).toFixed(1)}% of quote volume. Recent mean ${(spot.recent_mean_taker_buy_share_of_quote * 100).toFixed(1)}% over ${spot.bars} bars.</p><p>${escapeHtml(spot.note)}</p></div>`);
-    } else if (spot && spot.status === "absent") {
-      blocks.push(`<div class="context-block"><h3>Spot taker buys</h3><p>${escapeHtml(spot.reason)}</p></div>`);
+    if (deriv.status === "not_applicable") {
+      status.textContent = "Not used";
+      body.innerHTML = `<p>${escapeHtml(deriv.reason || "This file was not sent to a futures host.")}</p>${spotBlock(spot)}`;
+      return;
     }
-    root.innerHTML = blocks.join("") || "<p class='hint'>No context for this load.</p>";
+    if (deriv.status !== "ok") {
+      status.textContent = "Unavailable";
+      const when = deriv.checked_at ? ` Checked ${formatUtc(deriv.checked_at, true)}.` : "";
+      body.innerHTML = `<p class="status-bad">${escapeHtml(deriv.reason || "The futures host did not return data.")}${escapeHtml(when)} Nothing was filled in.</p>${spotBlock(spot)}`;
+      return;
+    }
+    const fund = deriv.funding && deriv.funding.latest;
+    const oi = deriv.open_interest && deriv.open_interest.latest;
+    const taker = deriv.taker && deriv.taker.latest;
+    status.textContent = "Aligned";
+    const fundLine = fund
+      ? `Funding ${(fund.funding_rate * 100).toFixed(4)}% per interval at ${formatUtc(fund.time)}.`
+      : "No funding record was at or before this candle close.";
+    const oiLine = oi
+      ? `Open interest ${formatPrice(oi.open_interest_contracts)} contracts${oi.open_interest_value_usdt != null ? `, about ${formatPrice(oi.open_interest_value_usdt)} USDT notional` : ""} at ${formatUtc(oi.time)}.`
+      : "No open-interest history point was at or before this candle close.";
+    const takerLine = taker && taker.taker_buy_share != null
+      ? `Taker buys were ${(taker.taker_buy_share * 100).toFixed(1)}% of taker volume on the last ${taker.period} perpetual bar (${formatUtc(taker.time)}).`
+      : "No perpetual taker bar was at or before this candle close.";
+    const after = deriv.after_as_of
+      ? `<p>A later open-interest snapshot exists at ${formatUtc(deriv.after_as_of.time)} (${formatPrice(deriv.after_as_of.open_interest_contracts)} contracts). It is after the candle close, so it is not treated as known then.</p>`
+      : "";
+    body.innerHTML = `<p>${fundLine}</p><p>${oiLine}</p><p>${takerLine}</p>${after}<details><summary>Units and source</summary><p>Host fapi.binance.com. Funding raw fraction ${fund ? fund.funding_rate : "—"}. Open interest is in contracts, and USDT notional only when Binance sent it. Taker figures are executed buy and sell volume, not an order book. ${escapeHtml((deriv.perpetual && deriv.perpetual.note) || "")}</p></details>${spotBlock(spot)}`;
+  }
+
+  function spotBlock(spot) {
+    if (!spot || spot.status === "absent") {
+      return `<p>${escapeHtml((spot && spot.reason) || "This spot response had no taker-buy field.")}</p>`;
+    }
+    if (spot.status !== "ok") return "";
+    return `<p>On the spot candles, taker buys were ${(spot.last_taker_buy_share_of_quote * 100).toFixed(1)}% of quote volume in the last bar, and ${(spot.recent_mean_taker_buy_share_of_quote * 100).toFixed(1)}% on average over ${spot.bars} bars.</p>`;
   }
 
   function amountLabel(policy) {
@@ -427,11 +479,34 @@
       ["down", "Down close"],
     ];
     if (state.dataset && state.dataset.forming) items.push(["forming", "Forming"]);
-    if (state.forecast) items.push(["forecast", state.forecast.sample_count > 1 ? "Median" : "Forecast"]);
-    if (state.forecast && state.forecast.mode === "held_out") items.push(["forming", "Later candles"]);
-    if (state.forecast && state.forecast.sample_count > 1) items.push(["sample", "Sample paths"]);
-    if (state.forecast && state.forecast.band) items.push(["forecast", "Dispersion"]);
-    el("legend").innerHTML = items.map(([kind, label]) => `<li><i class="swatch ${kind}"></i>${label}</li>`).join("");
+    if (state.forecast) items.push(["median", state.forecast.sample_count > 1 ? "Median close" : "Sample close"]);
+    if (state.forecast) items.push(["forecast", "Forecast candles"]);
+    if (state.showPaths && state.forecast && state.forecast.sample_count > 1) {
+      items.push(["sample", `${state.forecast.traces_shown || state.forecast.sample_count} paths`]);
+    }
+    if (state.showBand && state.forecast && state.forecast.band) items.push(["sample", "Dispersion"]);
+    el("legend").innerHTML = items.map(([kind, label]) => `<li><i class="swatch ${kind}"></i>${escapeHtml(label)}</li>`).join("");
+    const note = el("legend-note");
+    if (!note) return;
+    if (!state.forecast) {
+      note.textContent = "The space right of the line is the forecast region. It stays empty until a run finishes.";
+    } else if (state.forecast.sample_count > 1) {
+      note.textContent = state.showPaths
+        ? `The pale lines are ${state.forecast.traces_shown || state.forecast.sample_count} real paths. The median line stays the middle close. It is not a probability the price finishes there.`
+        : `Median line is the middle close of ${state.forecast.sample_count} real paths at each step. It is not a probability the price finishes there. Paths stay hidden until Show paths.`;
+    } else {
+      note.textContent = "One sampled path. There is no second line and no dispersion band.";
+    }
+    const paths = el("show-paths");
+    const band = el("show-band");
+    if (paths) {
+      paths.setAttribute("aria-pressed", state.showPaths ? "true" : "false");
+      paths.disabled = !(state.forecast && state.forecast.sample_count > 1);
+    }
+    if (band) {
+      band.setAttribute("aria-pressed", state.showBand ? "true" : "false");
+      band.disabled = !(state.forecast && state.forecast.band);
+    }
   }
 
   function factRows(rows) {
@@ -592,6 +667,20 @@
     });
   }
 
+  function togglePaths() {
+    if (!(state.forecast && state.forecast.sample_count > 1)) return;
+    state.showPaths = !state.showPaths;
+    storeFlag("kronos-show-paths", state.showPaths);
+    render();
+  }
+
+  function toggleBand() {
+    if (!(state.forecast && state.forecast.band)) return;
+    state.showBand = !state.showBand;
+    storeFlag("kronos-show-band", state.showBand);
+    render();
+  }
+
   function wait(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -609,8 +698,21 @@
         body: JSON.stringify({ checkpoints: 2, lookback: numbers().lookback, pred_len: Math.min(24, numbers().predLen) }),
       });
       state.log = report.log || state.log;
-      el("check-result").textContent = `Kronos median MAE ${report.kronos_median_mae.toExponential(3)}\nPersistence MAE ${report.persistence_mae.toExponential(3)}\n${report.comparison_note}\n${report.training_cutoff}`;
+      renderCheck(report);
     });
+  }
+
+  function renderCheck(report) {
+    const root = el("check-result");
+    if (!root || !report) return;
+    const windows = (report.checkpoints || []).length;
+    const horizon = report.settings ? report.settings.pred_len : "—";
+    const modelError = report.kronos_median_mae;
+    const baseError = report.persistence_mae;
+    let comparison = "On this slice the two errors matched.";
+    if (modelError < baseError) comparison = "On this slice the model error was lower than repeating the last close.";
+    else if (modelError > baseError) comparison = "On this slice repeating the last close had the lower error.";
+    root.innerHTML = `<p>${windows} windows, horizon ${horizon} candles, one sample each. Model mean absolute error ${formatPrice(modelError)} price units. Last-close baseline ${formatPrice(baseError)} price units. ${escapeHtml(comparison)}</p><p>${escapeHtml(report.training_cutoff || "")}</p>`;
   }
 
   async function exportRecord() {
@@ -688,6 +790,13 @@
     el("cancel").addEventListener("click", () => guard(cancelForecast()));
     el("run-check").addEventListener("click", () => guard(runCheck()));
     el("export-record").addEventListener("click", () => guard(exportRecord()));
+    el("show-paths").addEventListener("click", togglePaths);
+    el("show-band").addEventListener("click", toggleBand);
+    el("fit-forecast").addEventListener("click", () => {
+      chart.pan = 0;
+      chart.fitted = true;
+      chart.draw();
+    });
     el("csv-file").addEventListener("change", (event) => {
       const file = event.target.files && event.target.files[0];
       guard(loadCsv(file)).finally(() => {
@@ -736,6 +845,7 @@
     this.canvas = canvas;
     this.candlePx = 8;
     this.pan = 0;
+    this.fitted = true;
     this.cursor = null;
     this.drag = null;
     this.data = { candles: [], forming: null, forecast: null, horizon: 24 };
@@ -760,6 +870,7 @@
     if (!sameSeries) {
       this.pan = 0;
       this.cursor = null;
+      this.fitted = true;
     }
     this.draw();
   };
@@ -784,11 +895,21 @@
     const forming = this.data.forming;
     const pad = { l: 10, r: 78, t: 18, b: 22 };
     const plotW = Math.max(40, width - pad.l - pad.r);
-    const slot = this.candlePx + Math.max(2, this.candlePx * 0.42);
     const forward = forecast && forecast.mode === "forward" ? forecast.path : [];
-    const futureSlots = forward.length ? forward.length : Math.max(12, Math.min(28, this.data.horizon || 24));
-    const capacity = Math.max(futureSlots + 16, Math.floor(plotW / slot));
-    const pastCount = forecast && forecast.mode === "held_out" ? capacity : Math.max(16, capacity - futureSlots);
+    const futureN = forward.length;
+    const reserve = futureN || Math.max(10, Math.min(28, this.data.horizon || 24));
+    let pastCount;
+    let slot;
+    if (this.fitted) {
+      const pastTarget = Math.max(20, Math.round(reserve * 0.66 / 0.34));
+      pastCount = Math.min(observed.length, pastTarget);
+      slot = plotW / Math.max(1, pastCount + reserve);
+    } else {
+      slot = this.candlePx + Math.max(2, this.candlePx * 0.42);
+      const capacity = Math.max(reserve + 8, Math.floor(plotW / slot));
+      pastCount = Math.min(observed.length, Math.max(8, capacity - reserve));
+    }
+    this._slot = slot;
     const end = Math.max(0, observed.length - this.pan);
     const start = Math.max(0, end - pastCount);
     const visible = observed.slice(start, end);
@@ -809,12 +930,12 @@
         const host = bars.find((bar) => bar.key === point.time);
         if (!host) return;
         host.forecast = point;
-        host.samples = sampleAt(forecast, index);
-        host.q10 = bandAt(forecast, index, "q10");
-        host.q90 = bandAt(forecast, index, "q90");
-        host.q25 = bandAt(forecast, index, "q25");
-        host.q75 = bandAt(forecast, index, "q75");
-        host.meanClose = meanAt(forecast, index);
+        host.samples = state.showPaths ? sampleAt(forecast, index) : null;
+        host.q50 = bandAt(forecast, index, "q50");
+        host.q10 = state.showBand ? bandAt(forecast, index, "q10") : null;
+        host.q90 = state.showBand ? bandAt(forecast, index, "q90") : null;
+        host.q25 = state.showBand ? bandAt(forecast, index, "q25") : null;
+        host.q75 = state.showBand ? bandAt(forecast, index, "q75") : null;
       });
     }
     const futureBars = [];
@@ -827,12 +948,12 @@
           actual: null,
           forecast: point,
           forming: forming && index === 0 && forming.time === point.time ? forming : null,
-          samples: sampleAt(forecast, index),
-          q10: bandAt(forecast, index, "q10"),
-          q90: bandAt(forecast, index, "q90"),
-          q25: bandAt(forecast, index, "q25"),
-          q75: bandAt(forecast, index, "q75"),
-          meanClose: meanAt(forecast, index),
+          samples: state.showPaths ? sampleAt(forecast, index) : null,
+          q50: bandAt(forecast, index, "q50"),
+          q10: state.showBand ? bandAt(forecast, index, "q10") : null,
+          q90: state.showBand ? bandAt(forecast, index, "q90") : null,
+          q25: state.showBand ? bandAt(forecast, index, "q25") : null,
+          q75: state.showBand ? bandAt(forecast, index, "q75") : null,
         });
       });
     } else if (forming) {
@@ -848,30 +969,12 @@
     }
     const heldOut = Boolean(forecast && forecast.mode === "held_out");
     const all = heldOut ? bars : bars.concat(futureBars);
-    if (heldOut) {
-      const usedSlot = plotW / Math.max(all.length, 1);
-      all.forEach((bar, i) => {
-        bar.x = pad.l + i * usedSlot + usedSlot / 2;
-        bar.slot = usedSlot;
-      });
-      const boundaryIndex = all.findIndex((bar) => bar.actual || bar.forecast);
-      const boundaryX = boundaryIndex < 0 ? pad.l + plotW : pad.l + boundaryIndex * usedSlot;
-      return { pad, bars: all, boundaryX, forecast };
-    }
-    const pastSlots = Math.max(bars.length, 1);
-    const futureArea = Math.max(plotW * 0.32, Math.max(futureBars.length, 8) * slot);
-    const pastArea = Math.max(slot, plotW - futureArea);
-    const pastSlot = pastArea / pastSlots;
-    bars.forEach((bar, i) => {
-      bar.x = pad.l + i * pastSlot + pastSlot / 2;
-      bar.slot = pastSlot;
+    all.forEach((bar, i) => {
+      bar.x = pad.l + i * slot + slot / 2;
+      bar.slot = slot;
     });
-    const boundaryX = pad.l + pastArea;
-    const futureSlot = futureBars.length ? Math.min(slot * 1.15, (futureArea - 8) / futureBars.length) : slot;
-    futureBars.forEach((bar, i) => {
-      bar.x = boundaryX + i * futureSlot + futureSlot / 2;
-      bar.slot = futureSlot;
-    });
+    const boundaryIndex = heldOut ? all.findIndex((bar) => bar.actual || bar.forecast) : bars.length;
+    const boundaryX = boundaryIndex < 0 ? pad.l : pad.l + boundaryIndex * slot;
     return { pad, bars: all, boundaryX, forecast };
   };
 
@@ -902,15 +1005,15 @@
     ctx.fillRect(scene.boundaryX, priceTop, width - scene.boundaryX - scene.pad.r + 6, priceBottom - priceTop);
     const range = priceRange(scene.bars);
     drawGrid(ctx, scene, width, priceTop, priceBottom, range);
-    drawBand(ctx, scene.bars, priceTop, priceBottom, range);
-    drawMeanLine(ctx, scene.bars, priceTop, priceBottom, range);
+    if (state.showBand) drawBand(ctx, scene.bars, priceTop, priceBottom, range);
     scene.bars.forEach((bar) => {
       if (bar.actual) drawCandle(ctx, bar.x, bar.slot, bar.actual, priceTop, priceBottom, range, "actual");
       if (bar.observed) drawCandle(ctx, bar.x, bar.slot, bar.observed, priceTop, priceBottom, range, "observed");
       if (bar.forecast) drawCandle(ctx, bar.x, bar.slot, bar.forecast, priceTop, priceBottom, range, "forecast");
       if (bar.forming) drawForming(ctx, bar.x, bar.slot, bar.forming, priceTop, priceBottom, range);
     });
-    drawSampleLines(ctx, scene.bars, priceTop, priceBottom, range);
+    if (state.showPaths) drawSampleLines(ctx, scene.bars, priceTop, priceBottom, range);
+    drawMedianLine(ctx, scene.bars, priceTop, priceBottom, range);
     drawVolume(ctx, scene.bars, priceBottom + 8, height - scene.pad.b);
     drawBoundary(ctx, scene.boundaryX, priceTop, height - scene.pad.b, scene.forecast);
     drawPriceAxis(ctx, width, scene.pad.r, priceTop, priceBottom, range, scene.bars);
@@ -958,9 +1061,17 @@
 
   PriceChart.prototype.zoom = function (event) {
     event.preventDefault();
+    this.leaveFit();
     const next = this.candlePx + (event.deltaY > 0 ? -1 : 1);
     this.candlePx = Math.max(4, Math.min(16, next));
     this.draw();
+  };
+
+  PriceChart.prototype.leaveFit = function () {
+    if (!this.fitted) return;
+    const slot = this._slot || 12;
+    this.candlePx = Math.max(4, Math.min(16, slot * 0.62));
+    this.fitted = false;
   };
 
   PriceChart.prototype.down = function (event) {
@@ -970,7 +1081,8 @@
 
   PriceChart.prototype.move = function (event) {
     if (!this.drag) return;
-    const slot = this.candlePx + Math.max(2, this.candlePx * 0.45);
+    this.leaveFit();
+    const slot = this._slot || (this.candlePx + Math.max(2, this.candlePx * 0.45));
     const delta = Math.round((this.drag.x - event.clientX) / slot);
     const maxPan = Math.max(0, (this.data.candles || []).length - 1);
     this.pan = Math.max(0, Math.min(maxPan, this.drag.pan + delta));
@@ -979,8 +1091,26 @@
 
   PriceChart.prototype.key = function (event) {
     const candles = this.data.candles || [];
-    if (event.key === "Home") {
+    if (event.key === "Home" || event.key === "f" || event.key === "F") {
       this.pan = 0;
+      this.fitted = true;
+      this.draw();
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "p" || event.key === "P") {
+      togglePaths();
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "b" || event.key === "B") {
+      toggleBand();
+      event.preventDefault();
+      return;
+    }
+    if (event.key === "Escape") {
+      this.pan = 0;
+      this.fitted = true;
       this.draw();
       event.preventDefault();
       return;
@@ -1030,7 +1160,7 @@
         low = Math.min(low, close);
         high = Math.max(high, close);
       });
-      [bar.q10, bar.q90, bar.meanClose].forEach((value) => {
+      [bar.q10, bar.q90, bar.q50].forEach((value) => {
         if (Number.isFinite(value)) {
           low = Math.min(low, value);
           high = Math.max(high, value);
@@ -1086,8 +1216,9 @@
     ctx.lineTo(x, yLow);
     ctx.stroke();
     if (role === "forecast") {
-      ctx.fillStyle = up ? "rgba(31, 191, 134, 0.35)" : "rgba(242, 93, 108, 0.35)";
-      ctx.strokeStyle = "#5ee0d0";
+      ctx.globalAlpha = 0.72;
+      ctx.fillStyle = up ? "rgba(31, 191, 134, 0.7)" : "rgba(242, 93, 108, 0.65)";
+      ctx.strokeStyle = "rgba(210, 228, 224, 0.55)";
       ctx.strokeRect(x - width / 2, bodyTop, width, bodyH);
       ctx.fillRect(x - width / 2, bodyTop, width, bodyH);
     } else if (role === "actual") {
@@ -1137,20 +1268,22 @@
       ctx.fill();
     };
     ctx.save();
-    paint("q10", "q90", "rgba(94, 224, 208, 0.10)");
-    paint("q25", "q75", "rgba(94, 224, 208, 0.16)");
+    paint("q25", "q75", "rgba(94, 224, 208, 0.08)");
     ctx.restore();
   }
 
-  function drawMeanLine(ctx, bars, top, bottom, range) {
-    const points = bars.filter((bar) => Number.isFinite(bar.meanClose));
+  function drawMedianLine(ctx, bars, top, bottom, range) {
+    const points = bars.filter((bar) => Number.isFinite(bar.q50) || (bar.forecast && Number.isFinite(bar.forecast.close)));
     if (points.length < 2) return;
     ctx.save();
-    ctx.strokeStyle = "rgba(230, 195, 106, 0.9)";
-    ctx.setLineDash([4, 3]);
+    ctx.lineWidth = 2.4;
+    ctx.strokeStyle = "#f6e7a8";
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
     ctx.beginPath();
     points.forEach((bar, index) => {
-      const y = yOf(bar.meanClose, top, bottom, range);
+      const price = Number.isFinite(bar.q50) ? bar.q50 : bar.forecast.close;
+      const y = yOf(price, top, bottom, range);
       if (index === 0) ctx.moveTo(bar.x, y);
       else ctx.lineTo(bar.x, y);
     });
@@ -1162,9 +1295,10 @@
     const count = bars.reduce((max, bar) => Math.max(max, bar.samples ? bar.samples.length : 0), 0);
     if (!count) return;
     ctx.save();
-    ctx.lineWidth = 1.15;
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.38;
     for (let series = 0; series < count; series += 1) {
-      ctx.strokeStyle = series % 2 === 0 ? "rgba(94, 224, 208, 0.9)" : "rgba(230, 195, 106, 0.85)";
+      ctx.strokeStyle = "rgba(176, 214, 208, 0.95)";
       ctx.beginPath();
       let started = false;
       bars.forEach((bar) => {
@@ -1266,7 +1400,31 @@
     ctx.restore();
   }
 
+  function installUiTestHook() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("uitest") !== "1") return;
+    document.body.classList.add("uitest");
+    const banner = el("uitest-banner");
+    if (banner) banner.hidden = false;
+    window.__kronosApplyFixture = function (payload) {
+      state.dataset = payload.dataset;
+      state.candles = payload.candles || [];
+      state.context = payload.context || null;
+      state.forecast = payload.forecast || null;
+      state.log = payload.log || state.log;
+      if (payload.model) {
+        state.runtime = state.runtime || { model: { loaded: true, current: payload.model }, devices: { resolved_auto: "cpu" }, models: [] };
+        state.runtime.model = { loaded: true, current: payload.model };
+      }
+      chart.fitted = true;
+      chart.pan = 0;
+      if (payload.check) renderCheck(payload.check);
+      render();
+    };
+  }
+
   async function boot() {
+    installUiTestHook();
     bind();
     setSource("binance");
     try {

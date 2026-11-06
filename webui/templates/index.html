@@ -122,19 +122,34 @@
           </details>
         </section>
 
-        <section>
-          <details id="context-drawer">
-            <summary>Higher timeframes and perpetual context</summary>
-            <p class="hint">Closed bars only, aligned to the base as-of. These readings are not model forecasts and they are not combined into a score. A blocked futures host stays empty.</p>
-            <div id="context-body"></div>
-          </details>
-          <details id="check-drawer">
-            <summary>Walk-forward check</summary>
-            <p class="hint">Two or three checkpoints on this file, compared with a forecast that repeats the last close. One sample per checkpoint. Higher-timeframe and perpetual readings are not inputs, so they cannot change the error. The training cutoff of the public weights is unknown. A lower error here is not a general accuracy claim.</p>
-            <button type="button" class="ghost" id="run-check">Run 2 checkpoints</button>
-            <button type="button" class="ghost" id="export-record">Download forecast record</button>
-            <pre id="check-result" class="check-result"></pre>
-          </details>
+        <section class="side-cards" aria-label="Context readings">
+          <article class="side-card" id="card-higher">
+            <header>
+              <h2>Higher timeframes</h2>
+              <p id="higher-status">No data</p>
+            </header>
+            <p class="side-lead">Slower clocks built only from candles that had already closed. A direction here is a measurement, not a forecast and not a score.</p>
+            <div id="higher-body"></div>
+          </article>
+          <article class="side-card" id="card-perp">
+            <header>
+              <h2>Perpetual market</h2>
+              <p id="perp-status">No data</p>
+            </header>
+            <p class="side-lead">USD-M futures for this ticker, separate from spot. Kronos does not read these numbers.</p>
+            <div id="perp-body"></div>
+          </article>
+          <article class="side-card" id="card-check">
+            <header>
+              <h2>Walk-forward check</h2>
+            </header>
+            <p class="side-lead">Replays two past windows on this file. Each window is one sample, compared with repeating the last close. It needs at least the context plus the horizon in rows, and it is shorter than an eight-path forecast.</p>
+            <div class="side-actions">
+              <button type="button" class="ghost" id="run-check">Run 2 checkpoints</button>
+              <button type="button" class="ghost" id="export-record">Download record</button>
+            </div>
+            <div id="check-result"></div>
+          </article>
         </section>
 
         <section>
@@ -163,7 +178,13 @@
             <div class="readout" id="readout" aria-live="polite"></div>
           </div>
           <canvas id="chart" tabindex="0" role="img" aria-label="Candlestick chart" aria-describedby="chart-summary"></canvas>
-          <ul class="legend" id="legend"></ul>
+          <div class="chart-tools">
+            <button type="button" id="show-paths" aria-pressed="false">Show paths</button>
+            <button type="button" id="show-band" aria-pressed="false">Show dispersion</button>
+            <button type="button" id="fit-forecast">Fit forecast</button>
+            <ul class="legend" id="legend"></ul>
+          </div>
+          <p class="legend-note" id="legend-note"></p>
         </div>
         <p id="chart-summary" class="sr">No candles loaded.</p>
       </div>
@@ -172,7 +193,11 @@
           <header><h2>Forecast</h2><p id="forecast-kicker">Waiting</p></header>
           <p class="figure" id="forecast-figure">—</p>
           <p class="figure-label" id="forecast-figure-label">Horizon close</p>
-          <dl class="facts" id="forecast-facts"></dl>
+          <p class="lead" id="forecast-lead">The median appears after a forecast. It is the middle sample, not a chance the market ends there.</p>
+          <details id="forecast-details">
+            <summary>Details</summary>
+            <dl class="facts" id="forecast-facts"></dl>
+          </details>
         </article>
         <article>
           <header><h2>Data</h2><p id="data-kicker">No source</p></header>
@@ -186,6 +211,7 @@
     </div>
   </div>
 
+  <p id="uitest-banner" class="uitest" hidden>UI test fixture. Numbers on this screen were supplied by the test. They are not a model run and not live market output.</p>
   <footer>
     <p>Localhost only · no orders, accounts, or exchange login</p>
     <p>Kronos © 2025 ShiYu · MIT License · a research forecast, not an instruction to trade</p>

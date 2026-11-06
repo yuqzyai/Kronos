@@ -327,7 +327,73 @@ canvas {
 .swatch.down { background: var(--red); }
 .swatch.forecast { background: rgba(94, 224, 208, 0.25); border: 1px solid var(--cyan); }
 .swatch.forming { border: 1px dashed var(--muted); }
-.swatch.sample { height: 2px; background: var(--amber); }
+.swatch.sample { height: 2px; width: 14px; background: rgba(148, 196, 190, 0.7); }
+.swatch.median { height: 3px; width: 16px; background: #f6e7a8; }
+.chart-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--line);
+}
+.chart-tools button {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--muted);
+  padding: 4px 8px;
+}
+.chart-tools button[aria-pressed="true"] {
+  color: var(--cyan-ink);
+  border-color: var(--line-strong);
+}
+.legend { border-top: 0; padding: 0; text-transform: none; letter-spacing: 0.02em; font-size: 11px; }
+.legend-note {
+  margin: 0;
+  padding: 0 12px 8px;
+  color: var(--dim);
+  font-size: 11px;
+}
+.lead { color: var(--muted); font-size: 12px; margin: 6px 0 8px; }
+.side-cards { display: grid; gap: 8px; padding: 4px 0 12px; }
+.side-card {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 8px 10px 6px;
+  background: #0a1619;
+}
+.side-card header { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; margin-bottom: 4px; }
+.side-card h2 {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--cyan);
+  font-weight: 600;
+}
+.side-card header p { color: var(--muted); font-size: 11px; }
+.side-lead { color: var(--dim); font-size: 11px; margin-bottom: 6px; }
+.side-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.side-actions .ghost { width: auto; margin-top: 0; }
+.tf-row { padding: 6px 0; border-top: 1px solid var(--line); }
+.tf-row strong { letter-spacing: 0.06em; }
+.tf-row .chg { font-variant-numeric: tabular-nums; margin-left: 8px; }
+.tf-row .chg.up { color: var(--green); }
+.tf-row .chg.down { color: var(--red); }
+.tf-row p { color: var(--muted); font-size: 12px; margin-top: 2px; }
+.side-card details { margin-top: 4px; }
+.side-card summary { color: var(--dim); font-size: 11px; }
+.status-bad { color: var(--danger); }
+.status-ok { color: var(--ok); }
+.uitest {
+  margin: 0;
+  padding: 8px 16px;
+  background: #3a2a12;
+  color: #f6e7a8;
+  border-bottom: 1px solid rgba(246, 231, 168, 0.4);
+}
+body.uitest { grid-template-rows: auto auto auto minmax(0, 1fr) auto; }
 
 .deck {
   min-height: 0;
