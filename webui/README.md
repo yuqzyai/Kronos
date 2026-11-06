@@ -1,135 +1,84 @@
-# Kronos Web UI
+# Kronos local forecast UI
 
-Web user interface for Kronos financial prediction model, providing intuitive graphical operation interface.
+A localhost interface for the Kronos candlestick model. It loads real candles, loads a public Kronos checkpoint, and draws the model's own forecast. It does not place orders, keep an account, or invent prices when a feed fails.
 
-## ✨ Features
+The model code is unchanged. Sampling still goes through `KronosPredictor.predict`.
 
-- **Multi-format data support**: Supports CSV, Feather and other financial data formats
-- **Smart time window**: Fixed 400+120 data point time window slider selection
-- **Real model prediction**: Integrated real Kronos model, supports multiple model sizes
-- **Prediction quality control**: Adjustable temperature, nucleus sampling, sample count and other parameters
-- **Multi-device support**: Supports CPU, CUDA, MPS and other computing devices
-- **Comparison analysis**: Detailed comparison between prediction results and actual data
-- **K-line chart display**: Professional financial K-line chart display
+## Run
 
-## 🚀 Quick Start
+From the repository root, with the existing virtualenv activated:
 
-### Method 1: Start with Python script
 ```bash
+pip install -r requirements.txt -r webui/requirements.txt
 cd webui
 python run.py
 ```
 
-### Method 2: Start with Shell script
+Then open http://127.0.0.1:7070
+
+The server binds to `127.0.0.1` only. The Flask debugger and the reloader are off. `run.py` does not install packages and does not open a browser.
+
+`webui/start.sh` is the same start path.
+
+## What the screen does
+
+1. Load data. Binance spot public klines, the official sample, or a CSV. Choosing a file loads it in that same action.
+2. Load a model. The default is Kronos-base (102.3M parameters), the largest public checkpoint. Context defaults to 400 and cannot exceed that model's maximum (512 for base and small, 2048 for mini).
+3. Run a forecast. The default horizon is 24 candles and the default sample count is 1.
+
+Auto device selection uses Apple Silicon MPS when that PyTorch process actually has it, then CUDA if MPS is absent, otherwise CPU.
+
+One sample is one path. If you ask for 2–4 samples, each one is a separate `predict(..., sample_count=1)` call. The candles are the arithmetic mean of those draws, and each draw is a line. That spread is not a calibrated confidence interval. Temperature and top-p only change token sampling. They are behind the Sampling disclosure.
+
+Forward mode continues after the last closed candle. Held-out mode forecasts the last horizon candles already in the file and reports close-price MAE, RMSE, and MAPE against those later candles. That is an error on this file, not a trading result.
+
+## Binance spot
+
+Public market data only, no API key:
+
+- `GET /api/v3/klines`
+- `GET /api/v3/exchangeInfo?symbol=...`
+
+The host is `https://data-api.binance.vision`, which the [Binance spot REST documentation](https://github.com/binance/binance-spot-api-docs/blob/master/rest-api.md) specifies for public market data. `https://api.binance.com` is contacted only if the market-data host has a transport failure. An HTTP 451 or 403 is shown as a failure and is not routed around. No other host, and no user-supplied URL, is requested.
+
+Intervals are the documented kline intervals (`1s` through `1M`). Each request asks for at most 1000 klines. Quote asset volume is stored as `amount`. Open time is the candle timestamp, in UTC. A candle whose close time is still in the future is shown as forming and is not passed to the model. The forecast's first open is one interval after the last closed candle's open.
+
+Responses are cached per symbol, interval, and length (about 30 seconds to 5 minutes). Refresh is a button. A rate limit keeps the last successful series, labeled with its age, or shows the Binance error if nothing is cached.
+
+If Binance cannot be reached, load the official sample or a CSV. The chart is left empty rather than filled with substitute prices.
+
+## CSV and the official sample
+
+The official sample button loads `tests/data/regression_input.csv` and labels it as not live.
+
+A CSV needs `open`, `high`, `low`, `close`, and one timestamp column named `timestamps`, `timestamp`, `date`, `time`, `datetime`, or `datetime_utc`. `volume` and `amount` are optional. Missing timestamps are an error. Naive timestamps are read as UTC. If `amount` is absent and `volume` is present, Kronos fills amount from volume times the mean of OHLC when forecasting. If both are absent, Kronos fills them with zeros. Both cases are the existing library behavior and are written on the data panel.
+
+Uploads are stored under `webui/uploads/` and are limited to 8 MB and 50,000 rows.
+
+## Tests
+
+From the repository root:
+
 ```bash
-cd webui
-chmod +x start.sh
-./start.sh
+python -m pytest tests/test_webui.py tests/test_webui_binance_live.py
 ```
 
-### Method 3: Start Flask application directly
-```bash
-cd webui
-python app.py
-```
+`tests/test_webui.py` uses a fake predictor and a fake HTTP client. `tests/test_webui_binance_live.py` performs one real public request. Neither test downloads model weights.
 
-After successful startup, visit http://localhost:7070
+## Deploy and roll back
 
-## 📋 Usage Steps
+On the machine that already has the virtualenv, cache, and data:
 
-1. **Load data**: Select financial data file from data directory
-2. **Load model**: Select Kronos model and computing device
-3. **Set parameters**: Adjust prediction quality parameters
-4. **Select time window**: Use slider to select 400+120 data point time range
-5. **Start prediction**: Click prediction button to generate results
-6. **View results**: View prediction results in charts and tables
+1. Leave `.venv`, the Hugging Face cache, and `data/` in place. This UI does not write into them.
+2. Fetch the branch and check it out, or apply the patch from the delivery bundle onto a clean copy of the recorded base commit.
+3. Install only if the environment does not already satisfy `requirements.txt` and `webui/requirements.txt`:
+   `pip install -r requirements.txt -r webui/requirements.txt`
+4. Stop the old listener yourself if it is still bound to port 7070. Do not kill an unrelated process.
+5. Start with `cd webui && python run.py`.
+6. Open http://127.0.0.1:7070 and load the official sample. The chart should show its candles and the forecast button should stay disabled until you load a model.
 
-## 🔧 Prediction Quality Parameters
+To roll back, check out the previous commit (the base SHA recorded in the delivery manifest) with `git checkout <sha>` or `git switch -`. Do not use `git reset --hard`, and do not delete `.venv`, model caches, or data files. Uploads in `webui/uploads/` are local files; leave them unless you put them there during a trial.
 
-### Temperature (T)
-- **Range**: 0.1 - 2.0
-- **Effect**: Controls prediction randomness
-- **Recommendation**: 1.2-1.5 for better prediction quality
+## License
 
-### Nucleus Sampling (top_p)
-- **Range**: 0.1 - 1.0
-- **Effect**: Controls prediction diversity
-- **Recommendation**: 0.95-1.0 to consider more possibilities
-
-### Sample Count
-- **Range**: 1 - 5
-- **Effect**: Generate multiple prediction samples
-- **Recommendation**: 2-3 samples to improve quality
-
-## 📊 Supported Data Formats
-
-### Required Columns
-- `open`: Opening price
-- `high`: Highest price
-- `low`: Lowest price
-- `close`: Closing price
-
-### Optional Columns
-- `volume`: Trading volume
-- `amount`: Trading amount (not used for prediction)
-- `timestamps`/`timestamp`/`date`: Timestamp
-
-## 🤖 Model Support
-
-- **Kronos-mini**: 4.1M parameters, lightweight fast prediction
-- **Kronos-small**: 24.7M parameters, balanced performance and speed
-- **Kronos-base**: 102.3M parameters, high quality prediction
-
-## 🖥️ GPU Acceleration Support
-
-- **CPU**: General computing, best compatibility
-- **CUDA**: NVIDIA GPU acceleration, best performance
-- **MPS**: Apple Silicon GPU acceleration, recommended for Mac users
-
-## ⚠️ Notes
-
-- `amount` column is not used for prediction, only for display
-- Time window is fixed at 400+120=520 data points
-- Ensure data file contains sufficient historical data
-- First model loading may require download, please be patient
-
-## 🔍 Comparison Analysis
-
-The system automatically provides comparison analysis between prediction results and actual data, including:
-- Price difference statistics
-- Error analysis
-- Prediction quality assessment
-
-## 🛠️ Technical Architecture
-
-- **Backend**: Flask + Python
-- **Frontend**: HTML + CSS + JavaScript
-- **Charts**: Plotly.js
-- **Data processing**: Pandas + NumPy
-- **Model**: Hugging Face Transformers
-
-## 📝 Troubleshooting
-
-### Common Issues
-1. **Port occupied**: Modify port number in app.py
-2. **Missing dependencies**: Run `pip install -r requirements.txt`
-3. **Model loading failed**: Check network connection and model ID
-4. **Data format error**: Ensure data column names and format are correct
-
-### Log Viewing
-Detailed runtime information will be displayed in the console at startup, including model status and error messages.
-
-## 📄 License
-
-This project follows the license terms of the original Kronos project.
-
-## 🤝 Contributing
-
-Welcome to submit Issues and Pull Requests to improve this Web UI!
-
-## 📞 Support
-
-If you have questions, please check:
-1. Project documentation
-2. GitHub Issues
-3. Console error messages
+Kronos is copyright 2025 ShiYu and distributed under the MIT License. See the repository `LICENSE`.

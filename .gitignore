@@ -74,3 +74,6 @@ venv.bak/
 temp/
 tmp/
 .python-version
+
+# Local web UI uploads (user CSV files, not source)
+webui/uploads/
