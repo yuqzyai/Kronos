@@ -71,6 +71,15 @@ We have set up a live demo to visualize Kronos's forecasting results. The webpag
 
 **👉 [Access the Live Demo Here](https://shiyu-coder.github.io/Kronos-demo/)** 
 
+## Local forecast UI
+
+This fork includes a localhost interface in [`webui/`](webui/README.md). It runs at `http://127.0.0.1:7070`, reads public Binance spot candles or a CSV, and forecasts with the same `KronosPredictor` API as the examples. It does not place orders. Start it with the existing virtualenv:
+
+```bash
+pip install -r requirements.txt -r webui/requirements.txt
+cd webui && python run.py
+```
+
 ## 📦 Model Zoo 
 We release a family of pre-trained models with varying capacities to suit different computational and application needs. All models are readily accessible from the Hugging Face Hub.
 
