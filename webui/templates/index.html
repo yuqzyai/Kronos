@@ -9,7 +9,7 @@
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/app.css">
 </head>
-<body>
+<body data-layout="workspace">
   <a class="skip" href="#chart">Skip to chart</a>
   <header class="topbar">
     <div class="brand">
@@ -25,6 +25,11 @@
       </div>
     </div>
     <div class="top-meta">
+      <div class="layout-switch" role="radiogroup" aria-label="Layout">
+        <button type="button" role="radio" data-layout-choice="focus" aria-checked="false">Focus</button>
+        <button type="button" role="radio" data-layout-choice="workspace" aria-checked="true">Workspace</button>
+      </div>
+      <button type="button" id="toggle-controls" aria-expanded="false" aria-controls="rail" hidden>Controls</button>
       <p class="pill" id="source-pill"><i></i><span>Idle</span></p>
       <p class="last-block">
         <span class="k">Last close</span>
@@ -39,7 +44,7 @@
   </div>
 
   <div class="workspace">
-    <aside class="rail" aria-label="Data, model, and forecast">
+    <aside class="rail" id="rail" aria-label="Data, model, and forecast">
       <div class="readiness" id="readiness" aria-live="polite">
         <p><span>Data</span><strong id="ready-data">Not loaded</strong></p>
         <p><span>Model</span><strong id="ready-model">Not loaded</strong></p>
@@ -122,36 +127,6 @@
           </details>
         </section>
 
-        <section class="side-cards" aria-label="Context readings">
-          <article class="side-card" id="card-higher">
-            <header>
-              <h2>Higher timeframes</h2>
-              <p id="higher-status">No data</p>
-            </header>
-            <p class="side-lead">Slower clocks built only from candles that had already closed. A direction here is a measurement, not a forecast and not a score.</p>
-            <div id="higher-body"></div>
-          </article>
-          <article class="side-card" id="card-perp">
-            <header>
-              <h2>Perpetual market</h2>
-              <p id="perp-status">No data</p>
-            </header>
-            <p class="side-lead">USD-M futures for this ticker, separate from spot. Kronos does not read these numbers.</p>
-            <div id="perp-body"></div>
-          </article>
-          <article class="side-card" id="card-check">
-            <header>
-              <h2>Walk-forward check</h2>
-            </header>
-            <p class="side-lead">Replays two past windows on this file. Each window is one sample, compared with repeating the last close. It needs at least the context plus the horizon in rows, and it is shorter than an eight-path forecast.</p>
-            <div class="side-actions">
-              <button type="button" class="ghost" id="run-check">Run 2 checkpoints</button>
-              <button type="button" class="ghost" id="export-record">Download record</button>
-            </div>
-            <div id="check-result"></div>
-          </article>
-        </section>
-
         <section>
           <h2>3 · Forecast</h2>
           <label for="mode">Window</label>
@@ -188,12 +163,37 @@
         </div>
         <p id="chart-summary" class="sr">No candles loaded.</p>
       </div>
+      <section class="side-cards" aria-label="Context readings">
+        <details class="side-card" id="fold-higher">
+          <summary><span>Higher timeframes</span><span id="higher-status">No data</span></summary>
+          <p class="side-lead">Slower clocks built only from candles that had already closed. The percent is that bar’s price change, not a confidence score, and it is not fed to the model.</p>
+          <div id="higher-body"></div>
+        </details>
+        <details class="side-card" id="fold-perp">
+          <summary><span>Perpetual market</span><span id="perp-status">No data</span></summary>
+          <p class="side-lead">USD-M futures for this ticker, separate from spot. Kronos does not read these numbers. A blocked host stays empty.</p>
+          <div id="perp-body"></div>
+        </details>
+        <details class="side-card" id="fold-check">
+          <summary><span>Walk-forward check</span><span id="check-status">Not run</span></summary>
+          <p class="side-lead">Replays two past windows on this file. Each window is one sample, compared with repeating the last close. It needs the context plus the horizon in rows. Two windows are not enough to calibrate a probability, and the training cutoff of the weights is unknown.</p>
+          <div class="side-actions">
+            <button type="button" class="ghost" id="run-check">Run 2 checkpoints</button>
+            <button type="button" class="ghost" id="export-record">Download record</button>
+          </div>
+          <div id="check-result"></div>
+        </details>
+      </section>
       <section class="deck" aria-label="Forecast and status">
         <article>
           <header><h2>Forecast</h2><p id="forecast-kicker">Waiting</p></header>
           <p class="figure" id="forecast-figure">—</p>
           <p class="figure-label" id="forecast-figure-label">Horizon close</p>
           <p class="lead" id="forecast-lead">The median appears after a forecast. It is the middle sample, not a chance the market ends there.</p>
+          <div id="scenario-share" class="scenario" hidden>
+            <p class="scenario-count" id="scenario-count">—</p>
+            <p id="scenario-text"></p>
+          </div>
           <details id="forecast-details">
             <summary>Details</summary>
             <dl class="facts" id="forecast-facts"></dl>

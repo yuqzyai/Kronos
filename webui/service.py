@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ensemble import is_memory_error, summarize_paths
+from ensemble import is_memory_error, scenario_share, summarize_paths
 from market import CandleSeries, describe_horizon
 
 
@@ -511,6 +511,12 @@ def _run_forecast(predictor, info: ModelInfo, dataset: LoadedDataset, params: di
         "traces_total": summary["traces_total"],
         "ohlc_repairs": summary["ohlc_repairs"],
         "terminal": summary["terminal"],
+        "scenario": scenario_share(
+            summary["terminal"]["above"],
+            summary["terminal"]["below"],
+            summary["terminal"]["equal"],
+            horizon_text,
+        ),
         "dispersion_label": "model sample dispersion",
         "batch_size": max(1, int(sample_batch)),
         "actuals": actual_records,

@@ -24,10 +24,32 @@ sys.path.insert(0, str(ROOT))
 
 from context import as_of_close, build_market_context, resample_complete_bins  # noqa: E402
 from derivatives import FUTURES_HOST, FuturesClient  # noqa: E402
-from ensemble import empirical_quantile, repair_ohlc, summarize_paths  # noqa: E402
+from ensemble import empirical_quantile, repair_ohlc, scenario_share, summarize_paths  # noqa: E402
 from evaluate import checkpoint_origins, walk_forward  # noqa: E402
 from app import create_app  # noqa: E402
 from service import ModelInfo  # noqa: E402
+
+
+def test_scenario_share_counts_draws_and_refuses_a_profit_probability():
+    share = scenario_share(6, 2, 0, "24 candles · 1 hour each · 24 hours")
+    assert share["above"] == 6 and share["total"] == 8
+    assert share["above_share_percent"] == 75
+    assert share["step_percentage_points"] == 12.5
+    assert share["small_sample"] is True
+    assert share["text"].startswith("6 of 8 model scenarios")
+    assert "12.5 percentage points" in share["text"]
+    assert "not the chance of a profit" in share["text"]
+    assert "independent opinions" in share["text"]
+    single = scenario_share(1, 0, 0, "24 hours")
+    assert "not meaningful" in single["text"]
+    summary = summarize_paths(
+        [[{"time": "t", "open": 1, "high": 2, "low": 0.5, "close": 3, "volume": 1, "amount": 1}] for _ in range(2)]
+        + [[{"time": "t", "open": 1, "high": 2, "low": 0.5, "close": 0.5, "volume": 1, "amount": 1}]],
+        last_observed_close=1,
+    )
+    assert summary["terminal"]["above"] == 2
+    assert summary["terminal"]["below"] == 1
+    assert summary["scenario"]["total"] == 3
 
 
 def test_empirical_median_is_not_the_mean_and_repairs_ohlc():

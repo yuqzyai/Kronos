@@ -253,6 +253,8 @@
     const label = el("forecast-figure-label");
     const facts = el("forecast-facts");
     if (!forecast) {
+      const box = el("scenario-share");
+      if (box) box.hidden = true;
       kicker.textContent = "Waiting";
       figure.textContent = "—";
       figure.className = "figure flat";
@@ -280,6 +282,7 @@
         lead.textContent = `One sampled path. Horizon close is ${formatPrice(last.close)}. A single path has no dispersion band.`;
       }
     }
+    renderScenario(forecast);
     const rows = [
       ["Horizon", forecast.horizon_text],
       ["Opens", formatUtc(forecast.forecast_opens_at)],
@@ -290,6 +293,9 @@
       ["Elapsed", `${forecast.elapsed_seconds.toFixed(1)} s`],
       ["Model", `${forecast.model.name} · ${forecast.model.device}`],
     ];
+    if (forecast.scenario && forecast.scenario.total > 1) {
+      rows.push(["Draws", forecast.scenario.text]);
+    }
     if (terminal && forecast.sample_count > 1) {
       rows.push(["Mean close", formatPrice(terminal.mean_close)]);
       rows.push(["Sample q10–q90", `${formatPrice(terminal.q10)} – ${formatPrice(terminal.q90)}`]);
@@ -365,6 +371,21 @@
     rows.push(["Amount", amountLabel(dataset.amount_policy)]);
     if (dataset.warnings && dataset.warnings.length) rows.push(["Note", dataset.warnings[0]]);
     facts.innerHTML = factRows(rows);
+  }
+
+  function renderScenario(forecast) {
+    const box = el("scenario-share");
+    if (!box) return;
+    const share = forecast && forecast.scenario;
+    if (!share || share.total < 2) {
+      box.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    el("scenario-count").textContent = `${share.above} of ${share.total}`;
+    const percent = Number(share.above_share_percent).toFixed(1);
+    const step = Number(share.step_percentage_points);
+    el("scenario-text").textContent = `${percent}% of these ${share.total} draws end above the last close. The share moves in steps of ${step} points. One model, repeated. Not a chance of profit.`;
   }
 
   function renderContext() {
@@ -797,6 +818,14 @@
       chart.fitted = true;
       chart.draw();
     });
+    document.querySelectorAll("[data-layout-choice]").forEach((button) => {
+      button.addEventListener("click", () => setLayout(button.getAttribute("data-layout-choice")));
+    });
+    el("toggle-controls").addEventListener("click", () => {
+      const open = el("rail").classList.toggle("is-open");
+      el("toggle-controls").setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    ["fold-higher", "fold-perp", "fold-check"].forEach((id) => bindDisclosure(id, `kronos-${id}`));
     el("csv-file").addEventListener("change", (event) => {
       const file = event.target.files && event.target.files[0];
       guard(loadCsv(file)).finally(() => {
@@ -1400,9 +1429,34 @@
     ctx.restore();
   }
 
+  function setLayout(name) {
+    if (name !== "focus" && name !== "workspace") return;
+    document.body.dataset.layout = name;
+    try { sessionStorage.setItem("kronos-layout", name); } catch (_error) { /* keep the choice for this view */ }
+    document.querySelectorAll("[data-layout-choice]").forEach((button) => {
+      button.setAttribute("aria-checked", button.getAttribute("data-layout-choice") === name ? "true" : "false");
+    });
+    if (name === "workspace") {
+      el("rail").classList.remove("is-open");
+      el("toggle-controls").setAttribute("aria-expanded", "false");
+    }
+  }
+
+  function bindDisclosure(id, key) {
+    const node = el(id);
+    if (!node) return;
+    try {
+      const saved = sessionStorage.getItem(key);
+      if (saved === "open") node.open = true;
+      if (saved === "closed") node.open = false;
+    } catch (_error) { /* default closed */ }
+    node.addEventListener("toggle", () => {
+      try { sessionStorage.setItem(key, node.open ? "open" : "closed"); } catch (_error) { /* ignore */ }
+    });
+  }
+
   function installUiTestHook() {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("uitest") !== "1") return;
+    if (!window.__KRONOS_UITEST) return;
     document.body.classList.add("uitest");
     const banner = el("uitest-banner");
     if (banner) banner.hidden = false;
@@ -1427,6 +1481,9 @@
     installUiTestHook();
     bind();
     setSource("binance");
+    let savedLayout = "workspace";
+    try { savedLayout = sessionStorage.getItem("kronos-layout") || "workspace"; } catch (_error) { savedLayout = "workspace"; }
+    setLayout(savedLayout);
     try {
       const runtime = await api("/api/runtime");
       fillRuntime(runtime);

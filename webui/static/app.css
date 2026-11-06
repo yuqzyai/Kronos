@@ -17,7 +17,8 @@
   --ok: #b7f3dc;
   --ok-bg: #10241c;
   --shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
-  --font: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   --sans: "Segoe UI", "Helvetica Neue", Helvetica, Arial, sans-serif;
 }
 
@@ -251,7 +252,7 @@ input[type="range"] { width: 100%; accent-color: var(--cyan); }
   min-height: 0;
   min-width: 0;
   display: grid;
-  grid-template-rows: minmax(280px, 1fr) 188px;
+  grid-template-rows: minmax(240px, 1fr) auto minmax(140px, 188px);
 }
 .chart-wrap { min-height: 0; min-width: 0; display: flex; }
 .chart-stage {
@@ -363,16 +364,51 @@ canvas {
   padding: 8px 10px 6px;
   background: #0a1619;
 }
-.side-card header { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; margin-bottom: 4px; }
-.side-card h2 {
-  margin: 0;
-  font-size: 11px;
+.side-card > summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+  cursor: pointer;
+  color: var(--cyan);
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--cyan);
+  font-size: 11px;
   font-weight: 600;
 }
-.side-card header p { color: var(--muted); font-size: 11px; }
+.side-card > summary::-webkit-details-marker { display: none; }
+.side-card > summary::before { content: "▸"; margin-right: 6px; }
+.side-card[open] > summary::before { content: "▾"; }
+.side-card > summary span:last-child { color: var(--muted); letter-spacing: 0.04em; text-transform: none; font-weight: 500; }
+.scenario { margin: 8px 0 4px; }
+.scenario-count { font-size: 22px; color: var(--ink); font-variant-numeric: tabular-nums; }
+.scenario p { color: var(--muted); font-size: 12px; }
+.layout-switch { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.layout-switch button { background: transparent; border: 0; color: var(--muted); padding: 4px 8px; }
+.layout-switch button[aria-checked="true"] { color: var(--cyan-ink); background: #10282a; }
+#toggle-controls { background: transparent; border: 1px solid var(--line); color: var(--muted); border-radius: 4px; padding: 4px 8px; }
+body[data-layout="focus"] .workspace { grid-template-columns: 1fr; }
+body[data-layout="focus"] .rail { display: none; }
+body[data-layout="focus"] .rail.is-open {
+  display: flex;
+  position: fixed;
+  top: 52px;
+  bottom: 0;
+  left: 0;
+  width: min(360px, 100vw);
+  z-index: 6;
+  box-shadow: 12px 0 32px rgba(0, 0, 0, 0.45);
+}
+body[data-layout="focus"] #toggle-controls { display: inline-flex; }
+body[data-layout="workspace"] .side-cards { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
+body[data-layout="focus"] .deck { grid-template-columns: 1.3fr 1fr; }
+body[data-layout="focus"] .log-card { display: none; }
+.figure, .scenario-count, .last-block .v, .facts dd, .readout, .legend, .card-metrics b, #log {
+  font-family: var(--mono);
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
 .side-lead { color: var(--dim); font-size: 11px; margin-bottom: 6px; }
 .side-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .side-actions .ghost { width: auto; margin-top: 0; }
@@ -383,7 +419,7 @@ canvas {
 .tf-row .chg.down { color: var(--red); }
 .tf-row p { color: var(--muted); font-size: 12px; margin-top: 2px; }
 .side-card details { margin-top: 4px; }
-.side-card summary { color: var(--dim); font-size: 11px; }
+.side-card details summary { color: var(--dim); font-size: 11px; letter-spacing: 0; text-transform: none; }
 .status-bad { color: var(--danger); }
 .status-ok { color: var(--ok); }
 .uitest {
@@ -485,7 +521,11 @@ footer {
   .rail { border-right: 0; border-bottom: 1px solid var(--line); }
   .rail-scroll { overflow: visible; }
   .stage { display: flex; flex-direction: column; }
-  .chart-wrap { height: 640px; }
+  .chart-wrap { height: 520px; }
+  body[data-layout="workspace"] .side-cards,
+  body[data-layout="focus"] .side-cards { grid-template-columns: 1fr; }
+  .layout-switch button, #toggle-controls { font-size: 14px; }
+  .top-meta { flex-wrap: wrap; justify-content: flex-end; }
   .deck { grid-template-columns: 1fr; }
   .deck article { border-right: 0; border-bottom: 1px solid var(--line); }
   .plot-bar { align-items: flex-start; flex-direction: column; }

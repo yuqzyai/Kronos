@@ -101,8 +101,52 @@ def summarize_paths(paths: list[list[dict]], last_observed_close: float, trace_l
             "fraction_above": above / count,
             "fraction_below": below / count,
             "fraction_equal": equal / count,
+            "above": above,
+            "below": below,
+            "equal": equal,
             "samples": count,
         },
+        "scenario": scenario_share(above, below, equal, ""),
+    }
+
+
+def scenario_share(above: int, below: int, equal: int, horizon: str) -> dict:
+    """Share of finished model draws. Not a calibrated market probability."""
+
+    for name, value in (("above", above), ("below", below), ("equal", equal)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative whole number.")
+    total = above + below + equal
+    if total < 1:
+        raise ValueError("Need at least one scenario.")
+    step = 100 / total
+    percent = above / total * 100
+    if total == 1:
+        text = (
+            "One model scenario. A percentage of draws is not meaningful until there is more than one path. "
+            "This single draw is not the chance of a profit."
+        )
+    else:
+        ending = f"{above} of {total} model scenarios end above the last close, {below} end below"
+        if equal:
+            ending += f", and {equal} end unchanged"
+        ending += "."
+        scope = f" over {horizon}" if horizon else ""
+        text = (
+            f"{ending} That is {percent:.1f}% of these {total} draws{scope}. "
+            f"With {total} draws the share moves in steps of {step:.1f} percentage points. "
+            "These draws repeat one model. They are not independent opinions and not the chance of a profit."
+        )
+    return {
+        "above": above,
+        "below": below,
+        "equal": equal,
+        "total": total,
+        "above_share_percent": percent,
+        "step_percentage_points": step,
+        "horizon": horizon,
+        "small_sample": total < 30,
+        "text": text,
     }
 
 

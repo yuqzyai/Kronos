@@ -387,6 +387,10 @@ def test_forecast_requires_a_loaded_dataset_and_one_sample_is_one_path():
     assert compared["aggregation"] == "median_of_model_samples"
     assert compared["terminal"]["samples"] == 3
     assert compared["dispersion_label"] == "model sample dispersion"
+    assert compared["scenario"]["total"] == 3
+    assert compared["scenario"]["above"] + compared["scenario"]["below"] + compared["scenario"]["equal"] == 3
+    assert "not the chance of a profit" in compared["scenario"]["text"]
+    assert "percentage points" in compared["scenario"]["text"]
     assert "probability of profit" in compared["note"]
     assert len(compared["sample_closes"]) == 3
     assert len(compared["actuals"]) == 4
