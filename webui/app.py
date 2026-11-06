@@ -29,6 +29,7 @@ if str(WEB_DIR) not in sys.path:
 from context import build_market_context  # noqa: E402
 from derivatives import FuturesClient  # noqa: E402
 from evaluate import checkpoint_origins, forecast_record, walk_forward  # noqa: E402
+from research import evaluate_methods, nonoverlapping_origins  # noqa: E402
 from market import INTERVALS, MarketDataError, BinanceClient, csv_series  # noqa: E402
 from service import (  # noqa: E402
     DEFAULT_LOOKBACK,
@@ -303,6 +304,47 @@ def create_app(binance: BinanceClient | None = None, store: DatasetStore | None 
         report["settings"] = {"lookback": lookback, "pred_len": pred_len, "checkpoints": checkpoints, "samples": 1}
         app.config["LOG"].add(
             f"Walk-forward · {checkpoints} checkpoints · median MAE {report['kronos_median_mae']:.6g} · persistence MAE {report['persistence_mae']:.6g}"
+        )
+        report["log"] = app.config["LOG"].events
+        return jsonify(report)
+
+    @app.post("/api/research")
+    def research():
+        body = request.get_json(silent=True) or {}
+        current = app.config["STORE"].current
+        if current is None:
+            raise ApiError("No dataset is loaded. Load Binance candles, the official sample, or a CSV file first.")
+        info = app.config["MODELS"].info
+        predictor = app.config["MODELS"].predictor
+        if info is None or predictor is None:
+            raise ApiError("Load the model first. The research replay does not run without it, and it does not change the chart.")
+        try:
+            checkpoints = int(body.get("checkpoints", 3))
+        except (TypeError, ValueError) as exc:
+            raise ApiError("Windows must be a whole number from 2 to 4.") from exc
+        pred_len = min(24, max(1, int(body.get("pred_len", DEFAULT_PRED_LEN))))
+        room = len(current.series.frame) - pred_len
+        lookback = min(int(body.get("lookback", DEFAULT_LOOKBACK)), info.context_length, room)
+        try:
+            nonoverlapping_origins(len(current.series.frame), lookback, pred_len, checkpoints)
+        except ValueError as exc:
+            raise ApiError(str(exc)) from exc
+        frame = current.series.frame.copy()
+
+        def forecaster(history):
+            return _kronos_eval_forecast(predictor, history, pred_len)
+
+        report = evaluate_methods(frame, forecaster, lookback, pred_len, checkpoints)
+        report["model"] = {"name": info.name, "device": info.device}
+        report["settings"] = {
+            "lookback": lookback,
+            "pred_len": pred_len,
+            "checkpoints": checkpoints,
+            "samples": 1,
+        }
+        report["log"] = app.config["LOG"].events
+        app.config["LOG"].add(
+            f"Research replay · {report['windows']} non-overlapping windows · not applied to the chart"
         )
         report["log"] = app.config["LOG"].events
         return jsonify(report)

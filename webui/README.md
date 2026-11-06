@@ -24,7 +24,7 @@ The server binds to `127.0.0.1` only. The Flask debugger and the reloader are of
 
 1. Load data. Binance spot public klines, the official sample, or a CSV. Choosing a file loads it in that same action.
 2. Load a model. The default is Kronos-base (102.3M parameters), the largest public checkpoint. Context defaults to 400 and cannot exceed that model's maximum (512 for base and small, 2048 for mini).
-3. Run a forecast. The default horizon is 24 candles and the default sample count is 1.
+3. Run a forecast. The default horizon is 24 candles and the default sample count is 8.
 
 Auto device selection uses Apple Silicon MPS when that PyTorch process actually has it, then CUDA if MPS is absent, otherwise CPU.
 
@@ -37,6 +37,8 @@ Higher timeframes are closed-candle measurements aligned to the base as-of. For 
 USD-M funding, open interest, and taker buy/sell volume come only from `https://fapi.binance.com`. If that host is blocked, the panel says so and leaves the fields empty. Spot taker-buy share, when the kline response includes it, is quote-volume executed by taker buys. Order-book depth is not shown.
 
 A walk-forward check compares one Kronos sample per checkpoint with a persistence forecast on this file. The public weights' training end is not known here. Context overlays are not inputs, so they cannot change that error.
+
+The research lab is a separate, opt-in replay. It scores the raw Kronos path, a predeclared 25% mix toward the last close, a residual shift taken only from earlier windows, and a last-close repeat. The scored windows do not overlap. Every method is reported. None is selected, and the result is not drawn on the chart. Because the training end is unknown, the replay is not a pristine out-of-sample test. Direction counts are matches on those windows, not a calibrated probability, and they are not the scenario share of one forecast's paths.
 
 ## Binance spot
 
@@ -66,7 +68,7 @@ Uploads are stored under `webui/uploads/` and are limited to 8 MB and 50,000 row
 From the repository root:
 
 ```bash
-python -m pytest tests/test_webui.py tests/test_webui_context.py tests/test_webui_binance_live.py
+python -m pytest tests/test_webui.py tests/test_webui_context.py tests/test_webui_research.py tests/test_webui_binance_live.py
 ```
 
 `tests/test_webui.py` uses a fake predictor and a fake HTTP client. `tests/test_webui_binance_live.py` performs one real public request. Neither test downloads model weights.

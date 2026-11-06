@@ -723,6 +723,58 @@
     });
   }
 
+  async function runResearch() {
+    await withBusy("research", async () => {
+      const report = await api("/api/research", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          checkpoints: 3,
+          lookback: numbers().lookback,
+          pred_len: Math.min(24, numbers().predLen),
+        }),
+      });
+      state.log = report.log || state.log;
+      renderResearch(report);
+    });
+  }
+
+  const RESEARCH_LABELS = {
+    raw_median: "Raw Kronos",
+    mean: "Mean of draws",
+    shrinkage: "Last-close mix",
+    prior_residual: "Earlier residual",
+    persistence: "Repeat last close",
+  };
+
+  function renderResearch(report) {
+    const root = el("research-result");
+    const status = el("research-status");
+    if (!root || !report) return;
+    if (status) status.textContent = "Replay only";
+    const fold = el("fold-research");
+    if (fold) fold.open = true;
+    const rows = (report.methods || []).map((method) => {
+      const label = RESEARCH_LABELS[method.name] || method.name;
+      const direction = `${method.direction_same} of ${method.direction_windows}`;
+      return `<tr><th scope="row">${escapeHtml(label)}</th><td>${escapeHtml(formatPrice(method.close_mae))}</td><td>${escapeHtml(direction)}</td></tr>`;
+    }).join("");
+    root.innerHTML = `
+      <table class="research-table">
+        <caption>All methods on this replay. None is selected.</caption>
+        <thead><tr><th scope="col">Method</th><th scope="col">Close error</th><th scope="col">Same direction</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p>${escapeHtml(report.shrinkage_note || "")}</p>
+      <p>${escapeHtml(report.residual_note || "")}</p>
+      <p>${escapeHtml(report.direction_definition || "")}</p>
+      <p>${escapeHtml(report.mean_note || "")}</p>
+      <p>${escapeHtml(report.selection_note || "")}</p>
+      <p>${escapeHtml(report.probability_note || "")}</p>
+      <p>${escapeHtml(report.out_of_sample_note || "")} ${escapeHtml(report.training_cutoff || "")}</p>
+      <p>${escapeHtml(report.chart_note || "")}</p>`;
+  }
+
   function renderCheck(report) {
     const root = el("check-result");
     if (!root || !report) return;
@@ -810,6 +862,7 @@
     el("run").addEventListener("click", () => guard(runForecast()));
     el("cancel").addEventListener("click", () => guard(cancelForecast()));
     el("run-check").addEventListener("click", () => guard(runCheck()));
+    el("run-research").addEventListener("click", () => guard(runResearch()));
     el("export-record").addEventListener("click", () => guard(exportRecord()));
     el("show-paths").addEventListener("click", togglePaths);
     el("show-band").addEventListener("click", toggleBand);
@@ -825,7 +878,7 @@
       const open = el("rail").classList.toggle("is-open");
       el("toggle-controls").setAttribute("aria-expanded", open ? "true" : "false");
     });
-    ["fold-higher", "fold-perp", "fold-check"].forEach((id) => bindDisclosure(id, `kronos-${id}`));
+    ["fold-higher", "fold-perp", "fold-check", "fold-research"].forEach((id) => bindDisclosure(id, `kronos-${id}`));
     el("csv-file").addEventListener("change", (event) => {
       const file = event.target.files && event.target.files[0];
       guard(loadCsv(file)).finally(() => {
@@ -1011,7 +1064,7 @@
     const { ctx, width, height } = this.layout();
     const scene = this.scene(width);
     ctx.clearRect(0, 0, width, height);
-    ctx.fillStyle = "#061012";
+    ctx.fillStyle = "#0c1014";
     ctx.fillRect(0, 0, width, height);
     const glow = ctx.createRadialGradient(width * 0.74, height * 0.42, 12, width * 0.72, height * 0.48, width * 0.48);
     glow.addColorStop(0, "rgba(24, 110, 112, 0.16)");
@@ -1306,7 +1359,7 @@
     if (points.length < 2) return;
     ctx.save();
     ctx.lineWidth = 2.4;
-    ctx.strokeStyle = "#f6e7a8";
+    ctx.strokeStyle = "#f4f1ea";
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
     ctx.beginPath();
@@ -1406,7 +1459,7 @@
       const y = yOf(mark.close, top, bottom, range);
       ctx.fillStyle = mark.close >= mark.open ? "#1fbf86" : "#f25d6c";
       ctx.fillRect(width - right + 4, y - 8, right - 10, 16);
-      ctx.fillStyle = "#061012";
+      ctx.fillStyle = "#0c1014";
       ctx.fillText(formatPrice(mark.close), width - right + 8, y + 4);
     }
     ctx.restore();
@@ -1416,8 +1469,8 @@
     const labeled = bars.filter((bar) => bar.observed || bar.actual || bar.forecast || bar.forming);
     if (!labeled.length) return;
     ctx.save();
-    ctx.fillStyle = "#6f8b92";
-    ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+    ctx.fillStyle = "#9aa6b2";
+    ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
     const picks = [labeled[0], labeled[Math.floor(labeled.length / 2)], labeled[labeled.length - 1]];
     const seen = new Set();
     picks.forEach((bar) => {
@@ -1473,6 +1526,7 @@
       chart.fitted = true;
       chart.pan = 0;
       if (payload.check) renderCheck(payload.check);
+      if (payload.research) renderResearch(payload.research);
       render();
     };
   }
